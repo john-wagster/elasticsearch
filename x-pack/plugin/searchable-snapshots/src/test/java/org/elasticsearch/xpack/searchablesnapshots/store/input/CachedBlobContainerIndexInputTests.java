@@ -6,7 +6,11 @@
  */
 package org.elasticsearch.xpack.searchablesnapshots.store.input;
 
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
+import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.tests.util.TestUtil;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.blobcache.BlobCacheTestUtils;
@@ -18,6 +22,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.core.Tuple;
 import org.elasticsearch.index.IndexVersion;
+import org.elasticsearch.index.codec.vectors.diskbbq.DocIdsWriter;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.index.shard.ShardPath;
 import org.elasticsearch.index.snapshots.blobstore.BlobStoreIndexShardSnapshot;
@@ -37,6 +42,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -56,6 +62,169 @@ import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.notNullValue;
 
 public class CachedBlobContainerIndexInputTests extends AbstractSearchableSnapshotsTestCase {
+
+    public void testDeltaEncodedMod() throws Exception {
+
+        try (CacheService cacheService = randomCacheService()) {
+            cacheService.start();
+
+            SnapshotId snapshotId = new SnapshotId("_name", "_uuid");
+            IndexId indexId = new IndexId("_name", "_uuid");
+            ShardId shardId = new ShardId("_name", "_uuid", 0);
+
+            for (int i = 0; i < 5; i++) {
+                final String fileName = randomAlphaOfLength(5) + randomFileExtension();
+                final Tuple<String, byte[]> bytes = randomChecksumBytes(randomIntBetween(1, 100_000));
+
+                final byte[] input = bytes.v2();
+                final String checksum = bytes.v1();
+                final String blobName = randomUnicodeOfLength(10);
+                final StoreFileMetadata metadata = new StoreFileMetadata(
+                    fileName,
+                    input.length,
+                    checksum,
+                    IndexVersion.current().luceneVersion().toString()
+                );
+
+                final int partSize = randomBoolean() ? input.length : randomIntBetween(1, input.length);
+
+                final BlobStoreIndexShardSnapshot snapshot = new BlobStoreIndexShardSnapshot(
+                    snapshotId.getName(),
+                    List.of(new BlobStoreIndexShardSnapshot.FileInfo(blobName, metadata, ByteSizeValue.ofBytes(partSize))),
+                    0L,
+                    0L,
+                    0,
+                    0L
+                );
+
+                final boolean prewarmEnabled = randomBoolean();
+                final BlobContainer singleBlobContainer = singleSplitBlobContainer(blobName, input, partSize);
+                final BlobContainer blobContainer;
+                if (input.length == partSize && prewarmEnabled == false) {
+                    blobContainer = new CountingBlobContainer(singleBlobContainer);
+                } else {
+                    blobContainer = singleBlobContainer;
+                }
+
+                final boolean recoveryFinalizedDone = randomBoolean();
+                final Path shardDir = randomShardPath(shardId);
+                final ShardPath shardPath = new ShardPath(false, shardDir, shardDir, shardId);
+                final Path cacheDir = Files.createDirectories(resolveSnapshotCache(shardDir).resolve(snapshotId.getUUID()));
+                final SharedBlobCacheService<CacheKey> sharedBlobCacheService = defaultFrozenCacheService();
+                try (
+                    SearchableSnapshotDirectory directory = new SearchableSnapshotDirectory(
+                        () -> blobContainer,
+                        () -> snapshot,
+                        new NoopBlobStoreCacheService(),
+                        "_repo",
+                        snapshotId,
+                        indexId,
+                        shardId,
+                        Settings.builder()
+                            .put(SNAPSHOT_CACHE_ENABLED_SETTING.getKey(), true)
+                            .put(SNAPSHOT_CACHE_PREWARM_ENABLED_SETTING.getKey(), prewarmEnabled)
+                            .build(),
+                        () -> 0L,
+                        cacheService,
+                        cacheDir,
+                        shardPath,
+                        threadPool,
+                        sharedBlobCacheService
+                    )
+                ) {
+                    RecoveryState recoveryState = createRecoveryState(recoveryFinalizedDone);
+                    final PlainActionFuture<Void> future = new PlainActionFuture<>();
+                    final boolean loaded = directory.loadSnapshot(recoveryState, () -> false, future);
+                    if (randomBoolean()) {
+                        // randomly wait for pre-warm before running the below reads
+                        future.get();
+                    }
+                    assertThat("Failed to load snapshot", loaded, is(true));
+                    assertThat("Snapshot should be loaded", directory.snapshot(), notNullValue());
+                    assertThat("BlobContainer should be loaded", directory.blobContainer(), notNullValue());
+
+
+                    int numIters = atLeast(100);
+//                    try (Directory dir = newDirectory()) {
+                        for (int iter = 0; iter < numIters; ++iter) {
+                            int[] docIDs = new int[250 + random().nextInt(500)];
+                            final int bpv = TestUtil.nextInt(random(), 1, 32);
+                            for (int ii = 0; ii < docIDs.length; ++ii) {
+                                docIDs[ii] = TestUtil.nextInt(random(), 0, (1 << bpv) - 1);
+                            }
+                            Arrays.sort(docIDs);
+                            int[] deltaEncodedIds = new int[docIDs.length];
+                            deltaEncodedIds[0] = docIDs[0];
+                            for (int ii = 1; ii < docIDs.length; ii++) {
+                                deltaEncodedIds[ii] = docIDs[ii] - docIDs[ii - 1];
+                            }
+                            testMultiBlock(directory, deltaEncodedIds, 16);
+                        }
+//                    }
+
+//                    try (IndexInput indexInput = directory.openInput(fileName, randomIOContext())) {
+//                        assertThat(indexInput, instanceOf(CachedBlobContainerIndexInput.class));
+//                        assertEquals(input.length, indexInput.length());
+//                        assertEquals(0, indexInput.getFilePointer());
+//                        byte[] output = randomReadAndSlice(indexInput, input.length);
+//                        assertArrayEquals(input, output);
+//                    }
+                } finally {
+                    sharedBlobCacheService.close();
+                }
+
+                if (blobContainer instanceof CountingBlobContainer) {
+                    long numberOfRanges = BlobCacheTestUtils.numberOfRanges(
+                        input.length,
+                        recoveryFinalizedDone ? cacheService.getRangeSize() : cacheService.getRecoveryRangeSize()
+                    );
+                    assertThat(
+                        "Expected at most " + numberOfRanges + " ranges fetched from the source",
+                        ((CountingBlobContainer) blobContainer).totalOpens.sum(),
+                        lessThanOrEqualTo(numberOfRanges)
+                    );
+                    assertThat(
+                        "All bytes should have been read from source",
+                        ((CountingBlobContainer) blobContainer).totalBytes.sum(),
+                        equalTo((long) input.length)
+                    );
+                    // busy assert that closing of all streams happened because they are closed on background fetcher threads
+                    assertBusy(
+                        () -> assertEquals(
+                            "All open streams should have been closed",
+                            0,
+                            ((CountingBlobContainer) blobContainer).openStreams.get()
+                        )
+                    );
+                }
+            }
+        } finally {
+            assertThreadPoolNotBusy(threadPool);
+        }
+
+
+
+    }
+
+    public void testDeltaEncoded() throws Exception {
+        int numIters = atLeast(100);
+        try (Directory dir = newDirectory()) {
+            for (int iter = 0; iter < numIters; ++iter) {
+                int[] docIDs = new int[250 + random().nextInt(500)];
+                final int bpv = TestUtil.nextInt(random(), 1, 32);
+                for (int i = 0; i < docIDs.length; ++i) {
+                    docIDs[i] = TestUtil.nextInt(random(), 0, (1 << bpv) - 1);
+                }
+                Arrays.sort(docIDs);
+                int[] deltaEncodedIds = new int[docIDs.length];
+                deltaEncodedIds[0] = docIDs[0];
+                for (int i = 1; i < docIDs.length; i++) {
+                    deltaEncodedIds[i] = docIDs[i] - docIDs[i - 1];
+                }
+                testMultiBlock(dir, deltaEncodedIds, 16);
+            }
+        }
+    }
 
     public void testRandomReads() throws Exception {
         try (CacheService cacheService = randomCacheService()) {
@@ -255,6 +424,54 @@ public class CachedBlobContainerIndexInputTests extends AbstractSearchableSnapsh
                 assertThreadPoolNotBusy(threadPool);
             }
         }
+    }
+
+    private void testMultiBlock(Directory dir, int[] ints, int blockSize) throws Exception {
+        final long len;
+//        final int blockSize = 16 + random().nextInt(100);
+        DocIdsWriter docIdsWriter = new DocIdsWriter();
+//        IndexInput indexInput = dir.openInput("tmp", IOContext.DEFAULT)
+        try (IndexOutput out = dir.createOutput("tmp", IOContext.DEFAULT)) {
+
+            byte encoding = docIdsWriter.calculateBlockEncoding(i -> ints[i], ints.length, blockSize);
+            out.writeByte(encoding);
+            int limit = ints.length - blockSize + 1;
+            int i = 0;
+            for (; i < limit; i += blockSize) {
+                int offset = i;
+                docIdsWriter.writeDocIds(d -> ints[d + offset], blockSize, encoding, out);
+            }
+            // handle tail
+            if (i < ints.length) {
+                int offset = i;
+                docIdsWriter.writeDocIds(d -> ints[d + offset], ints.length - i, encoding, out);
+            }
+            len = out.getFilePointer();
+            if (random().nextBoolean()) {
+                out.writeLong(0); // garbage
+            }
+        }
+        try (IndexInput in = dir.openInput("tmp", IOContext.READONCE)) {
+            int[] read = new int[ints.length];
+            int[] block = new int[blockSize];
+            int limit = ints.length - blockSize + 1;
+            byte encoding = in.readByte();
+            int i = 0;
+            for (; i < limit; i += blockSize) {
+                int offset = i;
+                docIdsWriter.readInts(in, blockSize, encoding, block);
+                System.arraycopy(block, 0, read, offset, blockSize);
+            }
+            // handle tail
+            if (i < ints.length) {
+                int offset = i;
+                docIdsWriter.readInts(in, ints.length - i, encoding, block);
+                System.arraycopy(block, 0, read, offset, ints.length - i);
+            }
+            assertArrayEquals(ints, read);
+            assertEquals(len, in.getFilePointer());
+        }
+        dir.deleteFile("tmp");
     }
 
     private boolean containsEOFException(Throwable throwable, HashSet<Throwable> seenThrowables) {

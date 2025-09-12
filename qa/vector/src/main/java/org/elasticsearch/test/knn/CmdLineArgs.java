@@ -173,8 +173,8 @@ record CmdLineArgs(
         private int overSamplingFactor = 1;
         private int hnswM = 16;
         private int hnswEfConstruction = 200;
-        private int searchThreads = 1;
-        private int numSearchers = 1;
+        private int searchThreads = 32;
+        private int numSearchers = 32;
         private int indexThreads = 1;
         private boolean reindex = false;
         private boolean forceMerge = false;
@@ -338,9 +338,9 @@ record CmdLineArgs(
                 overSamplingFactor,
                 hnswM,
                 hnswEfConstruction,
-                searchThreads,
-                numSearchers,
-                indexThreads,
+                32,
+                32,
+                32,
                 reindex,
                 forceMerge,
                 filterSelectivity,

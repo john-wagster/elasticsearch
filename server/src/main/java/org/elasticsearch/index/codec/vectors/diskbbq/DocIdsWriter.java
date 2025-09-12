@@ -32,7 +32,7 @@ import java.io.IOException;
  *
  * <p>It is copied from the BKD implementation.
  */
-final class DocIdsWriter {
+public final class DocIdsWriter {
     public static final int DEFAULT_MAX_POINTS_IN_LEAF_NODE = 512;
 
     private static final byte CONTINUOUS_IDS = (byte) -2;
@@ -59,7 +59,7 @@ final class DocIdsWriter {
         scratchIntsRef.offset = 0;
     }
 
-    DocIdsWriter() {}
+    public DocIdsWriter() {}
 
     /**
      * Calculate the best encoding that will be used to write blocks of doc ids of blockSize.
@@ -70,7 +70,7 @@ final class DocIdsWriter {
      * @param blockSize the block size
      * @return the byte encoding to use for the blocks
      */
-    byte calculateBlockEncoding(IntToIntFunction docIds, int count, int blockSize) {
+    public byte calculateBlockEncoding(IntToIntFunction docIds, int count, int blockSize) {
         if (count == 0) {
             return CONTINUOUS_IDS;
         }
@@ -109,7 +109,7 @@ final class DocIdsWriter {
         }
     }
 
-    void writeDocIds(IntToIntFunction docIds, int count, byte encoding, DataOutput out) throws IOException {
+    public void writeDocIds(IntToIntFunction docIds, int count, byte encoding, DataOutput out) throws IOException {
         if (count == 0) {
             return;
         }
@@ -283,7 +283,7 @@ final class DocIdsWriter {
         }
     }
 
-    void readInts(IndexInput in, int count, byte encoding, int[] docIDs) throws IOException {
+    public void readInts(IndexInput in, int count, byte encoding, int[] docIDs) throws IOException {
         if (count == 0) {
             return;
         }

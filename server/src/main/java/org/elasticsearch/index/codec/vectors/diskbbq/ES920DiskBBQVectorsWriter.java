@@ -139,11 +139,13 @@ public class ES920DiskBBQVectorsWriter extends IVFVectorsWriter {
             for (int j = 0; j < size; j++) {
                 docDeltas[j] = j == 0 ? docIds[clusterOrds[j]] : docIds[clusterOrds[j]] - docIds[clusterOrds[j - 1]];
             }
+            assert Arrays.stream(docDeltas).allMatch(delta -> delta >= 0);
             onHeapQuantizedVectors.reset(centroid, size, ord -> cluster[clusterOrds[ord]]);
             byte encoding = idsWriter.calculateBlockEncoding(i -> docDeltas[i], size, ES91OSQVectorsScorer.BULK_SIZE);
             postingsOutput.writeByte(encoding);
             bulkWriter.writeVectors(onHeapQuantizedVectors, i -> {
                 // for vector i we write `bulk` size docs or the remaining docs
+//                assertArrayEquals(ints, read);
                 idsWriter.writeDocIds(d -> docDeltas[i + d], Math.min(ES91OSQVectorsScorer.BULK_SIZE, size - i), encoding, postingsOutput);
             });
             lengths.add(postingsOutput.getFilePointer() - fileOffset - offset);
@@ -295,6 +297,7 @@ public class ES920DiskBBQVectorsWriter extends IVFVectorsWriter {
                 // write vectors
                 bulkWriter.writeVectors(offHeapQuantizedVectors, i -> {
                     // for vector i we write `bulk` size docs or the remaining docs
+//                    assertArrayEquals(ints, read);
                     idsWriter.writeDocIds(
                         d -> docDeltas[d + i],
                         Math.min(ES91OSQVectorsScorer.BULK_SIZE, size - i),
