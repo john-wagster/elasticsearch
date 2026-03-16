@@ -20,18 +20,26 @@ import org.apache.lucene.search.QueryVisitor;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.ScorerSupplier;
+import org.apache.lucene.search.TaskExecutor;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TwoPhaseIterator;
 import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.Accountable;
+import org.apache.lucene.util.BitSetIterator;
 import org.apache.lucene.util.Bits;
+import org.apache.lucene.util.FixedBitSet;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.core.CheckedFunction;
+import org.elasticsearch.search.internal.ContextIndexSearcher;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 
 final class PercolateQuery extends Query implements Accountable {
 
@@ -82,26 +90,77 @@ final class PercolateQuery extends Query implements Accountable {
         }
     }
 
+    // Minimum number of candidate documents required to activate parallel verification.
+    // Below this threshold sequential verification is faster because thread dispatch overhead dominates.
+    static final int PARALLEL_MIN_CANDIDATES = 128;
+
     @Override
     public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
         final Weight verifiedMatchesWeight = verifiedMatchesQuery.createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, boost);
         final Weight candidateMatchesWeight = candidateMatchesQuery.createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, boost);
+        final TaskExecutor taskExecutor;
+        final int maxSlices;
+        if (searcher instanceof ContextIndexSearcher cis && cis.hasExecutor()) {
+            taskExecutor = searcher.getTaskExecutor();
+            maxSlices = cis.getMaximumNumberOfSlices();
+        } else {
+            taskExecutor = null;
+            maxSlices = 1;
+        }
         return new Weight(this) {
             @Override
             public Explanation explain(LeafReaderContext leafReaderContext, int docId) throws IOException {
+                if (taskExecutor != null) {
+                    // Direct single-doc verification avoids re-running full parallel verification.
+                    // First check if docId is a candidate match.
+                    ScorerSupplier candidateSupplier = candidateMatchesWeight.scorerSupplier(leafReaderContext);
+                    if (candidateSupplier == null) {
+                        return Explanation.noMatch("PercolateQuery");
+                    }
+                    Scorer candidateScorer = candidateSupplier.get(0L);
+                    if (candidateScorer.iterator().advance(docId) != docId) {
+                        return Explanation.noMatch("PercolateQuery");
+                    }
+                    // Verify this single doc against the MemoryIndex
+                    CheckedFunction<Integer, Query, IOException> percolatorQueries = queryStore.getQueries(leafReaderContext);
+                    Query query = percolatorQueries.apply(docId);
+                    if (query == null) {
+                        return Explanation.noMatch("PercolateQuery");
+                    }
+                    if (nonNestedDocsFilter != null) {
+                        query = new BooleanQuery.Builder().add(query, Occur.MUST).add(nonNestedDocsFilter, Occur.FILTER).build();
+                    }
+                    if (scoreMode.needsScores()) {
+                        TopDocs topDocs = percolatorIndexSearcher.search(query, 1);
+                        if (topDocs.scoreDocs.length > 0) {
+                            Explanation detail = percolatorIndexSearcher.explain(query, 0);
+                            return Explanation.match(topDocs.scoreDocs[0].score, "PercolateQuery", detail);
+                        }
+                    } else {
+                        if (Lucene.exists(percolatorIndexSearcher, query)) {
+                            return Explanation.match(0f, "PercolateQuery");
+                        }
+                    }
+                    return Explanation.noMatch("PercolateQuery");
+                }
+                // Sequential path: use scorer with TwoPhaseIterator
                 Scorer scorer = scorer(leafReaderContext);
                 if (scorer != null) {
                     TwoPhaseIterator twoPhaseIterator = scorer.twoPhaseIterator();
-                    int result = twoPhaseIterator.approximation().advance(docId);
-                    if (result == docId) {
-                        if (twoPhaseIterator.matches()) {
-                            if (scoreMode.needsScores()) {
-                                CheckedFunction<Integer, Query, IOException> percolatorQueries = queryStore.getQueries(leafReaderContext);
-                                Query query = percolatorQueries.apply(docId);
-                                Explanation detail = percolatorIndexSearcher.explain(query, 0);
-                                return Explanation.match(scorer.score(), "PercolateQuery", detail);
-                            } else {
-                                return Explanation.match(scorer.score(), "PercolateQuery");
+                    if (twoPhaseIterator != null) {
+                        int result = twoPhaseIterator.approximation().advance(docId);
+                        if (result == docId) {
+                            if (twoPhaseIterator.matches()) {
+                                if (scoreMode.needsScores()) {
+                                    CheckedFunction<Integer, Query, IOException> percolatorQueries = queryStore.getQueries(
+                                        leafReaderContext
+                                    );
+                                    Query query = percolatorQueries.apply(docId);
+                                    Explanation detail = percolatorIndexSearcher.explain(query, 0);
+                                    return Explanation.match(scorer.score(), "PercolateQuery", detail);
+                                } else {
+                                    return Explanation.match(scorer.score(), "PercolateQuery");
+                                }
                             }
                         }
                     }
@@ -127,6 +186,12 @@ final class PercolateQuery extends Query implements Accountable {
                     @Override
                     public Scorer get(long leadCost) throws IOException {
                         final Scorer approximation = approximationSupplier.get(leadCost);
+
+                        if (taskExecutor != null) {
+                            return parallelScorer(leafReaderContext, approximation, verifiedDocsScorer);
+                        }
+
+                        // Sequential path (original behavior)
                         final CheckedFunction<Integer, Query, IOException> percolatorQueries = queryStore.getQueries(leafReaderContext);
                         if (scoreMode.needsScores()) {
                             return new BaseScorer(approximation) {
@@ -197,6 +262,243 @@ final class PercolateQuery extends Query implements Accountable {
                         return approximationSupplier.cost();
                     }
                 };
+            }
+
+            /**
+             * Collect all candidate doc IDs from the approximation, then verify them against
+             * the MemoryIndex in parallel batches using the search thread pool.
+             */
+            private Scorer parallelScorer(LeafReaderContext leafReaderContext, Scorer approximation, ScorerSupplier verifiedDocsScorer)
+                throws IOException {
+                int maxDoc = leafReaderContext.reader().maxDoc();
+
+                // Collect all candidate doc IDs from the approximation
+                List<Integer> candidates = new ArrayList<>();
+                DocIdSetIterator approxIter = approximation.iterator();
+                for (int docId = approxIter.nextDoc(); docId != DocIdSetIterator.NO_MORE_DOCS; docId = approxIter.nextDoc()) {
+                    candidates.add(docId);
+                }
+
+                if (candidates.isEmpty()) {
+                    return new Scorer() {
+                        @Override
+                        public int docID() {
+                            return DocIdSetIterator.NO_MORE_DOCS;
+                        }
+
+                        @Override
+                        public DocIdSetIterator iterator() {
+                            return DocIdSetIterator.empty();
+                        }
+
+                        @Override
+                        public float getMaxScore(int upTo) {
+                            return 0f;
+                        }
+
+                        @Override
+                        public float score() {
+                            return 0f;
+                        }
+                    };
+                }
+
+                // For small candidate sets, fall back to sequential verification
+                if (candidates.size() < PARALLEL_MIN_CANDIDATES) {
+                    return sequentialVerify(leafReaderContext, candidates, maxDoc, verifiedDocsScorer);
+                }
+
+                // Determine number of threads: use configured parallelism but cap at candidate count
+                int numThreads = Math.min(maxSlices, candidates.size());
+                numThreads = Math.max(numThreads, 1);
+
+                // Split candidates into batches
+                int batchSize = (candidates.size() + numThreads - 1) / numThreads;
+
+                if (scoreMode.needsScores()) {
+                    // Scoring path: each thread collects matches and scores into per-thread maps
+                    // to avoid allocating a potentially large float[maxDoc] array.
+                    List<Callable<Map.Entry<FixedBitSet, Map<Integer, Float>>>> scoringTasks = new ArrayList<>(numThreads);
+                    for (int t = 0; t < numThreads; t++) {
+                        int from = t * batchSize;
+                        int to = Math.min(from + batchSize, candidates.size());
+                        if (from >= to) break;
+                        List<Integer> batch = candidates.subList(from, to);
+                        scoringTasks.add(() -> {
+                            CheckedFunction<Integer, Query, IOException> queries = queryStore.getQueries(leafReaderContext);
+                            FixedBitSet bits = new FixedBitSet(maxDoc);
+                            Map<Integer, Float> batchScores = new HashMap<>();
+                            for (int docId : batch) {
+                                Query query = queries.apply(docId);
+                                if (query != null) {
+                                    if (nonNestedDocsFilter != null) {
+                                        query = new BooleanQuery.Builder().add(query, Occur.MUST)
+                                            .add(nonNestedDocsFilter, Occur.FILTER)
+                                            .build();
+                                    }
+                                    TopDocs topDocs = percolatorIndexSearcher.search(query, 1);
+                                    if (topDocs.scoreDocs.length > 0) {
+                                        bits.set(docId);
+                                        batchScores.put(docId, topDocs.scoreDocs[0].score);
+                                    }
+                                }
+                            }
+                            return Map.entry(bits, batchScores);
+                        });
+                    }
+
+                    List<Map.Entry<FixedBitSet, Map<Integer, Float>>> scoringResults = taskExecutor.invokeAll(scoringTasks);
+
+                    // Merge results
+                    FixedBitSet merged = new FixedBitSet(maxDoc);
+                    Map<Integer, Float> scores = new HashMap<>();
+                    for (Map.Entry<FixedBitSet, Map<Integer, Float>> entry : scoringResults) {
+                        merged.or(entry.getKey());
+                        scores.putAll(entry.getValue());
+                    }
+
+                    return scorerFromBitSet(merged, scores);
+                } else {
+                    // Non-scoring path: each thread collects matches only.
+                    // Pre-compute verified bits into a FixedBitSet for thread-safe random access,
+                    // since Lucene.asSequentialAccessBits() must be consumed in order.
+                    FixedBitSet verifiedBits = precomputeVerifiedBits(maxDoc, verifiedDocsScorer);
+                    List<Callable<FixedBitSet>> tasks = new ArrayList<>(numThreads);
+                    for (int t = 0; t < numThreads; t++) {
+                        int from = t * batchSize;
+                        int to = Math.min(from + batchSize, candidates.size());
+                        if (from >= to) break;
+                        List<Integer> batch = candidates.subList(from, to);
+                        tasks.add(() -> {
+                            CheckedFunction<Integer, Query, IOException> queries = queryStore.getQueries(leafReaderContext);
+                            FixedBitSet bits = new FixedBitSet(maxDoc);
+                            for (int docId : batch) {
+                                if (verifiedBits.get(docId)) {
+                                    bits.set(docId);
+                                    continue;
+                                }
+                                Query query = queries.apply(docId);
+                                if (query == null) {
+                                    continue;
+                                }
+                                if (nonNestedDocsFilter != null) {
+                                    query = new BooleanQuery.Builder().add(query, Occur.MUST)
+                                        .add(nonNestedDocsFilter, Occur.FILTER)
+                                        .build();
+                                }
+                                if (Lucene.exists(percolatorIndexSearcher, query)) {
+                                    bits.set(docId);
+                                }
+                            }
+                            return bits;
+                        });
+                    }
+
+                    List<FixedBitSet> results = taskExecutor.invokeAll(tasks);
+
+                    // Merge results
+                    FixedBitSet merged = new FixedBitSet(maxDoc);
+                    for (FixedBitSet bits : results) {
+                        merged.or(bits);
+                    }
+
+                    return scorerFromBitSet(merged, null);
+                }
+            }
+
+            /**
+             * Sequential fallback for small candidate sets. Avoids thread dispatch overhead.
+             */
+            private Scorer sequentialVerify(
+                LeafReaderContext leafReaderContext,
+                List<Integer> candidates,
+                int maxDoc,
+                ScorerSupplier verifiedDocsScorer
+            ) throws IOException {
+                CheckedFunction<Integer, Query, IOException> queries = queryStore.getQueries(leafReaderContext);
+                FixedBitSet matchBits = new FixedBitSet(maxDoc);
+
+                if (scoreMode.needsScores()) {
+                    Map<Integer, Float> scores = new HashMap<>();
+                    for (int docId : candidates) {
+                        Query query = queries.apply(docId);
+                        if (query != null) {
+                            if (nonNestedDocsFilter != null) {
+                                query = new BooleanQuery.Builder().add(query, Occur.MUST).add(nonNestedDocsFilter, Occur.FILTER).build();
+                            }
+                            TopDocs topDocs = percolatorIndexSearcher.search(query, 1);
+                            if (topDocs.scoreDocs.length > 0) {
+                                matchBits.set(docId);
+                                scores.put(docId, topDocs.scoreDocs[0].score);
+                            }
+                        }
+                    }
+                    return scorerFromBitSet(matchBits, scores);
+                } else {
+                    Bits verifiedDocsBits = Lucene.asSequentialAccessBits(maxDoc, verifiedDocsScorer);
+                    for (int docId : candidates) {
+                        if (verifiedDocsBits.get(docId)) {
+                            matchBits.set(docId);
+                            continue;
+                        }
+                        Query query = queries.apply(docId);
+                        if (query == null) {
+                            continue;
+                        }
+                        if (nonNestedDocsFilter != null) {
+                            query = new BooleanQuery.Builder().add(query, Occur.MUST).add(nonNestedDocsFilter, Occur.FILTER).build();
+                        }
+                        if (Lucene.exists(percolatorIndexSearcher, query)) {
+                            matchBits.set(docId);
+                        }
+                    }
+                    return scorerFromBitSet(matchBits, null);
+                }
+            }
+
+            private Scorer scorerFromBitSet(FixedBitSet matchBits, Map<Integer, Float> scores) {
+                DocIdSetIterator iter = new BitSetIterator(matchBits, matchBits.cardinality());
+                return new Scorer() {
+                    @Override
+                    public int docID() {
+                        return iter.docID();
+                    }
+
+                    @Override
+                    public DocIdSetIterator iterator() {
+                        return iter;
+                    }
+
+                    @Override
+                    public float getMaxScore(int upTo) {
+                        return scores != null ? Float.MAX_VALUE : 0f;
+                    }
+
+                    @Override
+                    public float score() {
+                        return scores != null ? scores.getOrDefault(iter.docID(), 0f) : 0f;
+                    }
+                };
+            }
+
+            /**
+             * Pre-compute verified match bits into a FixedBitSet so that multiple threads
+             * can perform random-access lookups concurrently. The sequential-access Bits
+             * returned by {@link Lucene#asSequentialAccessBits} cannot be shared across threads.
+             */
+            private FixedBitSet precomputeVerifiedBits(int maxDoc, ScorerSupplier verifiedDocsScorer) throws IOException {
+                FixedBitSet bits = new FixedBitSet(maxDoc);
+                if (verifiedDocsScorer == null) {
+                    return bits;
+                }
+                Scorer scorer = verifiedDocsScorer.get(0L);
+                if (scorer != null) {
+                    DocIdSetIterator iter = scorer.iterator();
+                    for (int docId = iter.nextDoc(); docId != DocIdSetIterator.NO_MORE_DOCS; docId = iter.nextDoc()) {
+                        bits.set(docId);
+                    }
+                }
+                return bits;
             }
 
             @Override

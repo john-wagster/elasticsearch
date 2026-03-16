@@ -148,6 +148,15 @@ public class ContextIndexSearcher extends IndexSearcher implements Releasable {
         return hasExecutor;
     }
 
+    /**
+     * Returns the maximum number of slices that may be used for concurrent operations.
+     * This reflects the configured parallelism, typically derived from the search thread pool size.
+     * Returns -1 if no executor was provided.
+     */
+    public int getMaximumNumberOfSlices() {
+        return maximumNumberOfSlices;
+    }
+
     @Override
     protected LeafSlice[] slices(List<LeafReaderContext> leaves) {
         // we offload to the executor unconditionally, including requests that don't support concurrency

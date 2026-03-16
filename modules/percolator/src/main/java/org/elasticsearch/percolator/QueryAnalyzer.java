@@ -16,6 +16,7 @@ import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.BoostQuery;
 import org.apache.lucene.search.ConstantScoreQuery;
 import org.apache.lucene.search.DisjunctionMaxQuery;
+import org.apache.lucene.search.FieldExistsQuery;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.PointRangeQuery;
@@ -38,7 +39,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -112,6 +115,16 @@ final class QueryAnalyzer {
         boolean verified = true;
         int minimumShouldMatch = 0;
         List<Result> terms = new ArrayList<>();
+        // Groups MUST/FILTER clauses from the same parent query into a single conjunction builder.
+        // This ensures that when a disjunction builder receives MUST clauses (e.g., from a nested
+        // bool query), they are combined conjunctively rather than being treated as separate
+        // disjunction alternatives. Without this grouping, a query like:
+        // bool { should: [bool { must: [term(A), range(B), range(C)] }] }
+        // would produce MSM=1 instead of MSM=3, causing nearly all percolator queries to become
+        // candidates and requiring expensive MemoryIndex verification.
+        // This map is only used during visitor traversal for deduplication; the actual results
+        // are read from the children list in getResult().
+        private Map<Query, ResultBuilder> mustGroupByParent;
 
         private ResultBuilder(boolean conjunction) {
             this.conjunction = conjunction;
@@ -153,9 +166,17 @@ final class QueryAnalyzer {
             }
             this.verified = isVerified(parent);
             if (occur == Occur.MUST || occur == Occur.FILTER) {
-                ResultBuilder builder = new ResultBuilder(true);
-                children.add(builder);
-                return builder;
+                // Group all MUST/FILTER clauses from the same parent into a single conjunction
+                // builder so they are combined conjunctively in getResult(), even when this
+                // builder is a disjunction.
+                if (mustGroupByParent == null) {
+                    mustGroupByParent = new IdentityHashMap<>();
+                }
+                return mustGroupByParent.computeIfAbsent(parent, p -> {
+                    ResultBuilder builder = new ResultBuilder(true);
+                    children.add(builder);
+                    return builder;
+                });
             }
             if (occur == Occur.MUST_NOT) {
                 this.verified = false;
@@ -183,6 +204,11 @@ final class QueryAnalyzer {
                 terms.add(Result.MATCH_NONE);
             } else if (query instanceof PointRangeQuery) {
                 terms.add(pointRangeQuery((PointRangeQuery) query));
+            } else if (query instanceof FieldExistsQuery) {
+                // A FieldExistsQuery matches any document that has the field. For percolator
+                // purposes this is similar to MatchAllDocsQuery: it provides no useful terms
+                // for candidate selection but does not invalidate the analysis.
+                terms.add(new Result(true, true));
             } else {
                 terms.add(Result.UNKNOWN);
             }
@@ -325,8 +351,25 @@ final class QueryAnalyzer {
     }
 
     private static Result handleDisjunction(List<Result> disjunctions, int requiredShouldClauses) {
-        if (disjunctions.stream().anyMatch(Result::isUnknown)) {
+        // Filter out UNKNOWN results. An UNKNOWN SHOULD alternative (e.g., from
+        // bool { must_not: exists }) cannot contribute extractions, but the remaining
+        // known alternatives can still provide useful terms/ranges for candidate selection.
+        // The result must be marked unverified because the UNKNOWN clause could match
+        // documents that weren't selected as candidates.
+        List<Result> knownDisjunctions = disjunctions.stream().filter(r -> r.isUnknown() == false).toList();
+        if (knownDisjunctions.isEmpty()) {
             return Result.UNKNOWN;
+        }
+        boolean hasUnknownClauses = knownDisjunctions.size() < disjunctions.size();
+        if (hasUnknownClauses) {
+            // The UNKNOWN clause could match any document on its own, so we cannot require
+            // any minimum number of known-clause extractions. We still include the known
+            // extractions so the candidate query indexes them, but set MSM to 0 so this
+            // disjunction contributes nothing to the parent conjunction's minimum_should_match.
+            // This prevents false negatives where a document matches through the UNKNOWN
+            // clause path but would be rejected by an inflated MSM.
+            Result result = handleDisjunction(knownDisjunctions, 0);
+            return new Result(false, result.extractions, 0);
         }
         if (disjunctions.size() == 1) {
             return disjunctions.get(0);
@@ -335,7 +378,6 @@ final class QueryAnalyzer {
         List<Integer> clauses = new ArrayList<>(disjunctions.size());
         boolean verified = true;
         int numMatchAllClauses = 0;
-        boolean hasRangeExtractions = false;
 
         // In case that there are duplicate extracted terms / ranges then the msm should always be equal to the clause
         // with lowest msm, because the at percolate time there is no way to know the number of repetitions per
@@ -349,6 +391,13 @@ final class QueryAnalyzer {
         // that fact that only distinct values are indexed in extracted terms field this document would
         // never match.
         boolean hasDuplicateTerms = false;
+
+        // Track duplicate range field names across disjunction clauses. When multiple clauses have
+        // range extractions on the same field, a multi-valued document field could intersect multiple
+        // ranges from the same field, inflating the match count. In this case, we use the conservative
+        // minimum MSM (same treatment as duplicate terms) to avoid false negatives.
+        boolean hasDuplicateRangeFields = false;
+        Set<String> seenRangeFields = new HashSet<>();
 
         Set<QueryExtraction> terms = new HashSet<>();
         for (int i = 0; i < disjunctions.size(); i++) {
@@ -371,34 +420,34 @@ final class QueryAnalyzer {
                     verified = false;
                     hasDuplicateTerms = true;
                 }
-            }
-            if (hasRangeExtractions == false) {
-                hasRangeExtractions = subResult.extractions.stream().anyMatch(qe -> qe.range != null);
+                if (extraction.range != null) {
+                    if (seenRangeFields.add(extraction.range.fieldName) == false) {
+                        hasDuplicateRangeFields = true;
+                    }
+                }
             }
             clauses.add(resultMsm);
         }
         boolean matchAllDocs = numMatchAllClauses > 0 && numMatchAllClauses >= requiredShouldClauses;
 
         int msm = 0;
-        // Having ranges would mean we need to juggle with the msm and that complicates this logic a lot,
-        // so for now lets not do it.
-        if (hasRangeExtractions == false) {
-            // Figure out what the combined msm is for this disjunction:
-            // (sum the lowest required clauses, otherwise we're too strict and queries may not match)
-            clauses = clauses.stream().filter(val -> val > 0).sorted().collect(Collectors.toList());
+        // Figure out what the combined msm is for this disjunction:
+        // (sum the lowest required clauses, otherwise we're too strict and queries may not match)
+        clauses = clauses.stream().filter(val -> val > 0).sorted().collect(Collectors.toList());
 
-            // When there are duplicated query extractions, percolator can no longer reliably determine msm across this disjunction
-            if (hasDuplicateTerms) {
-                // pick lowest msm:
-                msm = clauses.get(0);
-            } else {
-                int limit = Math.min(clauses.size(), Math.max(1, requiredShouldClauses));
-                for (int i = 0; i < limit; i++) {
-                    msm += clauses.get(i);
-                }
-            }
+        // When there are duplicated query extractions or duplicate range fields, percolator can no
+        // longer reliably determine msm across this disjunction. Duplicate range fields are treated
+        // like duplicate terms because at percolate time, a single document field value could
+        // intersect multiple range extractions on the same field (especially for multi-valued fields),
+        // making it impossible to attribute range matches to specific clauses.
+        if (hasDuplicateTerms || hasDuplicateRangeFields) {
+            // pick lowest msm:
+            msm = clauses.isEmpty() ? 0 : clauses.get(0);
         } else {
-            msm = 1;
+            int limit = Math.min(clauses.size(), Math.max(1, requiredShouldClauses));
+            for (int i = 0; i < limit; i++) {
+                msm += clauses.get(i);
+            }
         }
         if (matchAllDocs) {
             return new Result(matchAllDocs, verified);

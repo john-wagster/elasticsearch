@@ -488,6 +488,7 @@ public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBu
                 && docs.stream().map(ParsedDocument::docs).mapToInt(List::size).anyMatch(size -> size > 1);
         } else {
             MemoryIndex memoryIndex = MemoryIndex.fromDocument(docs.get(0).rootDoc(), analyzer, true, false);
+            memoryIndex.freeze();
             docSearcher = memoryIndex.createSearcher();
             docSearcher.setQueryCache(null);
             excludeNestedDocuments = false;
@@ -547,11 +548,12 @@ public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBu
             if (binaryDocValues == null) {
                 return docId -> null;
             }
+            // Create a single shallow copy per segment rather than per document.
+            // The SearchExecutionContext wrapper holds no per-document state, so it is
+            // safe to reuse across all documents in a segment.
+            var percolateShardContext = newPercolateSearchContext(context, mapUnmappedFieldsAsText);
             return docId -> {
                 if (binaryDocValues.advanceExact(docId)) {
-                    // create a shallow copy and set overrides
-                    var percolateShardContext = newPercolateSearchContext(context, mapUnmappedFieldsAsText);
-
                     BytesRef qbSource = binaryDocValues.binaryValue();
                     QueryBuilder queryBuilder = readQueryBuilder(qbSource, registry, indexVersion, () -> {
                         // query builder is written in an incompatible format, fall-back to reading it from source
@@ -696,7 +698,12 @@ public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBu
 
             @Override
             public void addNamedQuery(String name, Query query) {
-                source.addNamedQuery(name, query);
+                // Synchronize on the source context because parallel verification threads
+                // may concurrently call addNamedQuery via independent copies that all
+                // delegate to the same source context's HashMap.
+                synchronized (source) {
+                    source.addNamedQuery(name, query);
+                }
             }
         };
 

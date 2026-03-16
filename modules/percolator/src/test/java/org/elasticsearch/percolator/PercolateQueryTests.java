@@ -33,6 +33,7 @@ import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.store.Directory;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.lucene.search.Queries;
+import org.elasticsearch.search.internal.ContextIndexSearcher;
 import org.elasticsearch.test.ESTestCase;
 import org.junit.After;
 import org.junit.Before;
@@ -40,6 +41,8 @@ import org.junit.Before;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 
 import static org.hamcrest.Matchers.arrayWithSize;
 import static org.hamcrest.Matchers.equalTo;
@@ -196,6 +199,101 @@ public class PercolateQueryTests extends ESTestCase {
         assertThat(explanation.isMatch(), is(true));
         assertThat(explanation.getValue(), equalTo(topDocs.scoreDocs[2].score));
         assertThat(explanation.getDetails(), arrayWithSize(1));
+    }
+
+    /**
+     * Tests the parallel verification path by using a ContextIndexSearcher with an executor
+     * and more candidates than PARALLEL_MIN_CANDIDATES (128). Verifies both scoring and
+     * non-scoring paths produce correct results and that explain works without re-running
+     * full parallel verification.
+     */
+    public void testPercolateQueryParallelVerification() throws Exception {
+        int numQueries = PercolateQuery.PARALLEL_MIN_CANDIDATES + randomIntBetween(10, 100);
+        List<Query> queries = new ArrayList<>();
+        PercolateQuery.QueryStore queryStore = ctx -> queries::get;
+
+        // Create queries: half match "fox", half match "missing" (won't match the document)
+        int expectedMatches = 0;
+        for (int i = 0; i < numQueries; i++) {
+            if (i % 2 == 0) {
+                queries.add(new TermQuery(new Term("field", "fox")));
+                expectedMatches++;
+            } else {
+                queries.add(new TermQuery(new Term("field", "missing")));
+            }
+            indexWriter.addDocument(Collections.singleton(new StringField("select", "a", Field.Store.NO)));
+        }
+        indexWriter.close();
+        directoryReader = DirectoryReader.open(directory);
+
+        // Create ContextIndexSearcher with executor to activate the parallel path
+        ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(randomIntBetween(2, 4));
+        try {
+            ContextIndexSearcher shardSearcher = new ContextIndexSearcher(
+                directoryReader,
+                IndexSearcher.getDefaultSimilarity(),
+                IndexSearcher.getDefaultQueryCache(),
+                IndexSearcher.getDefaultQueryCachingPolicy(),
+                false,
+                executor,
+                executor.getMaximumPoolSize(),
+                1
+            );
+
+            MemoryIndex memoryIndex = new MemoryIndex();
+            memoryIndex.addField("field", "the quick brown fox jumps over the lazy dog", new WhitespaceAnalyzer());
+            memoryIndex.freeze();
+            IndexSearcher percolateSearcher = memoryIndex.createSearcher();
+
+            // Non-scoring path (ConstantScoreQuery wrapper)
+            Query query = new ConstantScoreQuery(
+                new PercolateQuery(
+                    "_name",
+                    queryStore,
+                    Collections.singletonList(new BytesArray("{}")),
+                    new TermQuery(new Term("select", "a")),
+                    percolateSearcher,
+                    null,
+                    Queries.NO_DOCS_INSTANCE
+                )
+            );
+            TopDocs topDocs = shardSearcher.search(query, numQueries + 10);
+            assertThat(topDocs.totalHits.value(), equalTo((long) expectedMatches));
+            assertThat(topDocs.scoreDocs.length, equalTo(expectedMatches));
+
+            // Verify all matched docs are even-numbered (the "fox" queries)
+            for (int i = 0; i < topDocs.scoreDocs.length; i++) {
+                assertThat("matched doc should be an even-numbered query", topDocs.scoreDocs[i].doc % 2, equalTo(0));
+            }
+
+            // Verify explain works for a matching doc
+            Explanation explanation = shardSearcher.explain(query, 0);
+            assertThat(explanation.isMatch(), is(true));
+
+            // Verify explain works for a non-matching doc
+            Explanation noMatchExplanation = shardSearcher.explain(query, 1);
+            assertThat(noMatchExplanation.isMatch(), is(false));
+
+            // Scoring path (no ConstantScoreQuery wrapper)
+            Query scoringQuery = new PercolateQuery(
+                "_name",
+                queryStore,
+                Collections.singletonList(new BytesArray("{}")),
+                new TermQuery(new Term("select", "a")),
+                percolateSearcher,
+                null,
+                Queries.NO_DOCS_INSTANCE
+            );
+            topDocs = shardSearcher.search(scoringQuery, numQueries + 10);
+            assertThat(topDocs.totalHits.value(), equalTo((long) expectedMatches));
+
+            // Verify scoring explain returns match with detail
+            Explanation scoringExplanation = shardSearcher.explain(scoringQuery, 0);
+            assertThat(scoringExplanation.isMatch(), is(true));
+            assertThat(scoringExplanation.getDetails(), arrayWithSize(1));
+        } finally {
+            terminate(executor);
+        }
     }
 
 }

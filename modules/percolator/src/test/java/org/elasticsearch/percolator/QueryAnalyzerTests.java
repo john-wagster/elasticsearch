@@ -31,6 +31,7 @@ import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.BoostQuery;
 import org.apache.lucene.search.ConstantScoreQuery;
 import org.apache.lucene.search.DisjunctionMaxQuery;
+import org.apache.lucene.search.FieldExistsQuery;
 import org.apache.lucene.search.IndexOrDocValuesQuery;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.MultiPhraseQuery;
@@ -697,7 +698,12 @@ public class QueryAnalyzerTests extends ESTestCase {
         builder.add(termQuery1, BooleanClause.Occur.SHOULD);
         builder.add(termRangeQuery, BooleanClause.Occur.SHOULD);
         BooleanQuery bq = builder.build();
-        assertEquals(Result.UNKNOWN, analyze(bq));
+        // The UNKNOWN clause (termRangeQuery) does not poison the entire disjunction.
+        // The known term extraction survives with MSM=0 and unverified.
+        Result result = analyze(bq);
+        assertFalse(result.verified);
+        assertThat(result.minimumShouldMatch, equalTo(0));
+        assertTermsEqual(result.extractions, termQuery1.getTerm());
     }
 
     public void testExtractQueryMetadata_unsupportedQueryInBoolQueryWithMustClauses() {
@@ -982,7 +988,9 @@ public class QueryAnalyzerTests extends ESTestCase {
         boolQuery.add(LongPoint.newRangeQuery("_field2", 10, 15), BooleanClause.Occur.SHOULD);
         result = analyze(boolQuery.build());
         assertFalse(result.verified);
-        assertThat(result.minimumShouldMatch, equalTo(1));
+        // With MSM=2 and ranges on different fields, both clauses must match,
+        // so the combined MSM correctly reflects the sum of the two lowest clause MSMs.
+        assertThat(result.minimumShouldMatch, equalTo(2));
         assertEquals(2, result.extractions.size());
         assertEquals("_field2", new ArrayList<>(result.extractions).get(0).range.fieldName);
         assertEquals("_field1", new ArrayList<>(result.extractions).get(1).range.fieldName);
@@ -996,6 +1004,141 @@ public class QueryAnalyzerTests extends ESTestCase {
         assertEquals(2, result.extractions.size());
         assertEquals("_field1", new ArrayList<>(result.extractions).get(0).range.fieldName);
         assertEquals("_field1", new ArrayList<>(result.extractions).get(1).range.fieldName);
+    }
+
+    public void testMustClausesInShouldAreGroupedConjunctively() {
+        // Tests the query pattern from GitHub issue #114392:
+        // bool { should: [
+        // bool { must: [term(cat=flat1), range(price,1-10000), range(area,1-100)] },
+        // bool { must: [term(cat=flat2), range(price,10001-20000), range(area,101-200)] }
+        // ]}
+        // Previously, MUST clauses within SHOULD were incorrectly treated as disjunction
+        // alternatives, producing MSM=1. Now they are properly grouped as conjunctions,
+        // yielding MSM=3 (the minimum of the two inner conjunctions' MSMs).
+        BooleanQuery inner1 = new BooleanQuery.Builder().add(new TermQuery(new Term("cat", "flat1")), Occur.MUST)
+            .add(LongPoint.newRangeQuery("price", 1, 10000), Occur.MUST)
+            .add(LongPoint.newRangeQuery("area", 1, 100), Occur.MUST)
+            .build();
+        BooleanQuery inner2 = new BooleanQuery.Builder().add(new TermQuery(new Term("cat", "flat2")), Occur.MUST)
+            .add(LongPoint.newRangeQuery("price", 10001, 20000), Occur.MUST)
+            .add(LongPoint.newRangeQuery("area", 101, 200), Occur.MUST)
+            .build();
+        BooleanQuery outer = new BooleanQuery.Builder().add(inner1, Occur.SHOULD).add(inner2, Occur.SHOULD).build();
+
+        Result result = analyze(outer);
+        assertFalse(result.verified);
+        // 6 unique extractions: 2 terms + 4 ranges (price and area ranges are on different fields with different bounds)
+        assertEquals(6, result.extractions.size());
+        // MSM should be 3: each inner conjunction contributes MSM=3 (1 term + 2 ranges on different fields).
+        // Duplicate range fields across SHOULD clauses ("price" and "area" appear in both) trigger the
+        // conservative minimum path: min(3, 3) = 3.
+        assertThat(result.minimumShouldMatch, equalTo(3));
+    }
+
+    public void testSingleMustGroupInsideShould() {
+        // Simplest case: a single SHOULD clause containing MUST clauses.
+        // Exercises the mustGroupByParent grouping in isolation (no disjunction MSM logic).
+        BooleanQuery inner = new BooleanQuery.Builder().add(new TermQuery(new Term("cat", "flat1")), Occur.MUST)
+            .add(LongPoint.newRangeQuery("price", 1, 10000), Occur.MUST)
+            .build();
+        BooleanQuery outer = new BooleanQuery.Builder().add(inner, Occur.SHOULD).build();
+
+        Result result = analyze(outer);
+        assertFalse(result.verified);
+        assertEquals(2, result.extractions.size());
+        // The single inner conjunction has MSM=2 (1 term + 1 range on different field)
+        assertThat(result.minimumShouldMatch, equalTo(2));
+    }
+
+    public void testMustClausesInShouldWithSameRangeFields() {
+        // When inner conjunctions share range field names (e.g., both have range on "price"),
+        // duplicate range fields cause conservative MSM (minimum of clause MSMs)
+        BooleanQuery inner1 = new BooleanQuery.Builder().add(new TermQuery(new Term("cat", "flat1")), Occur.MUST)
+            .add(LongPoint.newRangeQuery("price", 1, 10000), Occur.MUST)
+            .build();
+        BooleanQuery inner2 = new BooleanQuery.Builder().add(new TermQuery(new Term("cat", "flat2")), Occur.MUST)
+            .add(LongPoint.newRangeQuery("price", 10001, 20000), Occur.MUST)
+            .build();
+        BooleanQuery outer = new BooleanQuery.Builder().add(inner1, Occur.SHOULD).add(inner2, Occur.SHOULD).build();
+
+        Result result = analyze(outer);
+        assertFalse(result.verified);
+        assertEquals(4, result.extractions.size());
+        // Duplicate range field "price" across clauses -> conservative MSM = min(2, 2) = 2
+        assertThat(result.minimumShouldMatch, equalTo(2));
+    }
+
+    public void testDisjunctionWithUnknownClausePreservesKnownExtractions() {
+        // A SHOULD clause with one known term and one UNKNOWN alternative (e.g., TermRangeQuery)
+        // should extract the known term with MSM=0 and mark unverified, rather than returning
+        // UNKNOWN for the entire disjunction.
+        TermQuery termQuery = new TermQuery(new Term("_field", "_term"));
+        TermRangeQuery unsupported = new TermRangeQuery("_field", null, null, true, false);
+        BooleanQuery bq = new BooleanQuery.Builder().add(termQuery, Occur.SHOULD).add(unsupported, Occur.SHOULD).build();
+
+        Result result = analyze(bq);
+        assertFalse(result.verified);
+        assertFalse(result.matchAllDocs);
+        // MSM must be 0 because the UNKNOWN clause could match any document on its own
+        assertThat(result.minimumShouldMatch, equalTo(0));
+        assertTermsEqual(result.extractions, termQuery.getTerm());
+    }
+
+    public void testDisjunctionWithAllUnknownClausesReturnsUnknown() {
+        // When all SHOULD alternatives are UNKNOWN, the disjunction is UNKNOWN.
+        TermRangeQuery unsupported1 = new TermRangeQuery("_field1", null, null, true, false);
+        TermRangeQuery unsupported2 = new TermRangeQuery("_field2", null, null, true, false);
+        BooleanQuery bq = new BooleanQuery.Builder().add(unsupported1, Occur.SHOULD).add(unsupported2, Occur.SHOULD).build();
+
+        assertEquals(Result.UNKNOWN, analyze(bq));
+    }
+
+    public void testDisjunctionWithUnknownInsideMustPreservesOtherMustClauses() {
+        // Reproduces the pattern from GitHub issue #114392:
+        // bool { must: [
+        // bool { should: [term("type":"flat"), UNKNOWN] },
+        // range("price", 1, 10000)
+        // ]}
+        // The SHOULD disjunction has one UNKNOWN child, producing MSM=0 for that clause.
+        // The conjunction should still use the range extraction from the other MUST clause.
+        TermQuery termQuery = new TermQuery(new Term("type", "flat"));
+        TermRangeQuery unsupported = new TermRangeQuery("type", null, null, true, false);
+        BooleanQuery shouldClause = new BooleanQuery.Builder().add(termQuery, Occur.SHOULD).add(unsupported, Occur.SHOULD).build();
+
+        BooleanQuery outer = new BooleanQuery.Builder().add(shouldClause, Occur.MUST)
+            .add(LongPoint.newRangeQuery("price", 1, 10000), Occur.MUST)
+            .build();
+
+        Result result = analyze(outer);
+        assertFalse(result.verified);
+        // The SHOULD clause contributes MSM=0, the range contributes MSM=1.
+        // The term extraction from the SHOULD clause is also included but doesn't increase MSM.
+        assertThat(result.minimumShouldMatch, equalTo(1));
+        // 2 extractions: 1 term (type:flat) + 1 range (price)
+        assertEquals(2, result.extractions.size());
+    }
+
+    public void testFieldExistsQueryTreatedAsMatchAll() {
+        // A standalone FieldExistsQuery is treated like MatchAllDocsQuery: it matches any
+        // document that has the field, providing no useful terms for candidate selection.
+        FieldExistsQuery existsQuery = new FieldExistsQuery("_field");
+        Result result = analyze(existsQuery);
+        assertTrue(result.verified);
+        assertTrue(result.matchAllDocs);
+        assertThat(result.minimumShouldMatch, equalTo(0));
+        assertThat(result.extractions.size(), equalTo(0));
+    }
+
+    public void testFieldExistsQueryInConjunction() {
+        // FieldExistsQuery in a MUST clause acts as matchAllDocs for that clause,
+        // so the conjunction's MSM comes from the other clauses.
+        FieldExistsQuery existsQuery = new FieldExistsQuery("_field");
+        TermQuery termQuery = new TermQuery(new Term("_field2", "value"));
+        BooleanQuery bq = new BooleanQuery.Builder().add(existsQuery, Occur.FILTER).add(termQuery, Occur.MUST).build();
+
+        Result result = analyze(bq);
+        assertThat(result.minimumShouldMatch, equalTo(1));
+        assertTermsEqual(result.extractions, termQuery.getTerm());
     }
 
     public void testExtractQueryMetadata_duplicatedClauses() {
@@ -1119,7 +1262,12 @@ public class QueryAnalyzerTests extends ESTestCase {
 
         source = Intervals.or(Intervals.term("b"), Intervals.wildcard(new BytesRef("a*")));
         result = analyze(new IntervalQuery("field", source));
-        assertEquals(Result.UNKNOWN, result);
+        // The UNKNOWN wildcard alternative does not poison the disjunction.
+        // The known term extraction survives with MSM=0 and unverified.
+        assertThat(result.verified, is(false));
+        assertThat(result.matchAllDocs, is(false));
+        assertThat(result.minimumShouldMatch, equalTo(0));
+        assertTermsEqual(result.extractions, new Term("field", "b"));
 
         source = Intervals.ordered(Intervals.term("term1"), Intervals.prefix(new BytesRef("a")));
         result = analyze(new IntervalQuery("field", source));
@@ -1134,7 +1282,12 @@ public class QueryAnalyzerTests extends ESTestCase {
 
         source = Intervals.or(Intervals.term("b"), Intervals.prefix(new BytesRef("a")));
         result = analyze(new IntervalQuery("field", source));
-        assertEquals(Result.UNKNOWN, result);
+        // The UNKNOWN prefix alternative does not poison the disjunction.
+        // The known term extraction survives with MSM=0 and unverified.
+        assertThat(result.verified, is(false));
+        assertThat(result.matchAllDocs, is(false));
+        assertThat(result.minimumShouldMatch, equalTo(0));
+        assertTermsEqual(result.extractions, new Term("field", "b"));
 
         source = Intervals.containedBy(Intervals.term("a"), Intervals.ordered(Intervals.term("b"), Intervals.term("c")));
         result = analyze(new IntervalQuery("field", source));
