@@ -10,7 +10,7 @@
 package org.elasticsearch.index.codec.vectors.diskbbq;
 
 import org.apache.lucene.index.FieldInfo;
-import org.apache.lucene.index.FloatVectorValues;
+import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
@@ -73,7 +73,7 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader<IVFVectorsReader
         IndexInput postingListSlice,
         AcceptDocs acceptDocs,
         float approximateCost,
-        FloatVectorValues values,
+        KnnVectorValues values,
         float visitRatio
     ) throws IOException {
         final FieldEntry fieldEntry = fields.get(fieldInfo.number);
@@ -375,7 +375,7 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader<IVFVectorsReader
     @Override
     public PostingVisitor getPostingVisitor(
         FieldInfo fieldInfo,
-        FloatVectorValues values,
+        KnnVectorValues values,
         IndexInput indexInput,
         float[] target,
         Bits acceptDocs,

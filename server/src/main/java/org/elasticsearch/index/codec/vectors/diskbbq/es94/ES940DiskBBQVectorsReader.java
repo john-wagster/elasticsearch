@@ -11,7 +11,6 @@ package org.elasticsearch.index.codec.vectors.diskbbq.es94;
 
 import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.index.FieldInfo;
-import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.VectorEncoding;
@@ -106,7 +105,7 @@ public class ES940DiskBBQVectorsReader extends IVFVectorsReader<ES940DiskBBQVect
         IndexInput postingListSlice,
         AcceptDocs acceptDocs,
         float approximateCost,
-        FloatVectorValues values,
+        KnnVectorValues values,
         float visitRatio
     ) throws IOException {
         final NextFieldEntry fieldEntry = fields.get(fieldInfo.number);
@@ -597,7 +596,7 @@ public class ES940DiskBBQVectorsReader extends IVFVectorsReader<ES940DiskBBQVect
     @Override
     public PostingVisitor getPostingVisitor(
         FieldInfo fieldInfo,
-        FloatVectorValues values,
+        KnnVectorValues values,
         IndexInput indexInput,
         float[] target,
         Bits acceptDocs,

@@ -368,42 +368,25 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             int[] quantized = new int[quantEncoding.discretizedDimensions(fieldInfo.getVectorDimension())];
             byte[] binary = new byte[quantEncoding.getDocPackedLength(fieldInfo.getVectorDimension())];
             float[] scratch = new float[fieldInfo.getVectorDimension()];
+            // Use native byte[] quantization when the float values are byte-backed without preconditioning (non-COSINE)
+            KMeansFloatVectorValues byteBackedValues = floatVectorValues instanceof KMeansFloatVectorValues km
+                && km.isByteBacked()
+                && km.isPreconditioned() == false
+                && vectorSimilarityFunction != VectorSimilarityFunction.COSINE ? km : null;
             for (int i = 0; i < assignments.length; i++) {
                 int c = assignments[i];
                 float[] centroid = centroidSupplier.centroid(c);
                 float[] parentCentroid = centroidClusters.getCentroid(c);
-                float[] vector = floatVectorValues.vectorValue(i);
                 boolean overspill = overspillAssignments.length > i && overspillAssignments[i] != NO_SOAR_ASSIGNMENT;
-                OptimizedScalarQuantizer.QuantizationResult result = quantizer.scalarQuantize(
-                    vector,
-                    scratch,
-                    quantized,
-                    quantEncoding.bits(),
-                    centroid
-                );
-                if (parentCentroid != null) {
-                    float additionalCorrection = vectorSimilarityFunction == VectorSimilarityFunction.EUCLIDEAN
-                        ? ESVectorUtil.squareDistance(vector, parentCentroid)
-                        : ESVectorUtil.dotProduct(scratch, parentCentroid);
-                    result = new OptimizedScalarQuantizer.QuantizationResult(
-                        result.lowerInterval(),
-                        result.upperInterval(),
-                        additionalCorrection,
-                        result.quantizedComponentSum()
-                    );
-                }
-                quantEncoding.pack(quantized, binary);
-                writeQuantizedValue(quantizedVectorsTemp, binary, result);
-                if (overspill) {
-                    int s = overspillAssignments[i];
-                    float[] overspillCentroid = centroidSupplier.centroid(s);
-                    float[] overspillParentCentroid = centroidClusters.getCentroid(s);
-                    // write the overspill vector as well
-                    result = quantizer.scalarQuantize(vector, scratch, quantized, quantEncoding.bits(), overspillCentroid);
-                    if (overspillParentCentroid != null) {
+                OptimizedScalarQuantizer.QuantizationResult result;
+                if (byteBackedValues != null) {
+                    byte[] byteVector = byteBackedValues.byteVectorValue(i);
+                    result = quantizer.scalarQuantize(byteVector, scratch, quantized, quantEncoding.bits(), centroid);
+                    if (parentCentroid != null) {
+                        float[] vector = floatVectorValues.vectorValue(i);
                         float additionalCorrection = vectorSimilarityFunction == VectorSimilarityFunction.EUCLIDEAN
-                            ? ESVectorUtil.squareDistance(vector, overspillParentCentroid)
-                            : ESVectorUtil.dotProduct(scratch, overspillParentCentroid);
+                            ? ESVectorUtil.squareDistance(vector, parentCentroid)
+                            : ESVectorUtil.dotProduct(scratch, parentCentroid);
                         result = new OptimizedScalarQuantizer.QuantizationResult(
                             result.lowerInterval(),
                             result.upperInterval(),
@@ -413,11 +396,79 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                     }
                     quantEncoding.pack(quantized, binary);
                     writeQuantizedValue(quantizedVectorsTemp, binary, result);
+                    if (overspill) {
+                        int s = overspillAssignments[i];
+                        float[] overspillCentroid = centroidSupplier.centroid(s);
+                        float[] overspillParentCentroid = centroidClusters.getCentroid(s);
+                        result = quantizer.scalarQuantize(byteVector, scratch, quantized, quantEncoding.bits(), overspillCentroid);
+                        if (overspillParentCentroid != null) {
+                            float[] vector = floatVectorValues.vectorValue(i);
+                            float additionalCorrection = vectorSimilarityFunction == VectorSimilarityFunction.EUCLIDEAN
+                                ? ESVectorUtil.squareDistance(vector, overspillParentCentroid)
+                                : ESVectorUtil.dotProduct(scratch, overspillParentCentroid);
+                            result = new OptimizedScalarQuantizer.QuantizationResult(
+                                result.lowerInterval(),
+                                result.upperInterval(),
+                                additionalCorrection,
+                                result.quantizedComponentSum()
+                            );
+                        }
+                        quantEncoding.pack(quantized, binary);
+                        writeQuantizedValue(quantizedVectorsTemp, binary, result);
+                    } else {
+                        Arrays.fill(binary, (byte) 0);
+                        OptimizedScalarQuantizer.QuantizationResult zeroResult = new OptimizedScalarQuantizer.QuantizationResult(
+                            0f,
+                            0f,
+                            0f,
+                            0
+                        );
+                        writeQuantizedValue(quantizedVectorsTemp, binary, zeroResult);
+                    }
                 } else {
-                    // write a zero vector for the overspill
-                    Arrays.fill(binary, (byte) 0);
-                    OptimizedScalarQuantizer.QuantizationResult zeroResult = new OptimizedScalarQuantizer.QuantizationResult(0f, 0f, 0f, 0);
-                    writeQuantizedValue(quantizedVectorsTemp, binary, zeroResult);
+                    float[] vector = floatVectorValues.vectorValue(i);
+                    result = quantizer.scalarQuantize(vector, scratch, quantized, quantEncoding.bits(), centroid);
+                    if (parentCentroid != null) {
+                        float additionalCorrection = vectorSimilarityFunction == VectorSimilarityFunction.EUCLIDEAN
+                            ? ESVectorUtil.squareDistance(vector, parentCentroid)
+                            : ESVectorUtil.dotProduct(scratch, parentCentroid);
+                        result = new OptimizedScalarQuantizer.QuantizationResult(
+                            result.lowerInterval(),
+                            result.upperInterval(),
+                            additionalCorrection,
+                            result.quantizedComponentSum()
+                        );
+                    }
+                    quantEncoding.pack(quantized, binary);
+                    writeQuantizedValue(quantizedVectorsTemp, binary, result);
+                    if (overspill) {
+                        int s = overspillAssignments[i];
+                        float[] overspillCentroid = centroidSupplier.centroid(s);
+                        float[] overspillParentCentroid = centroidClusters.getCentroid(s);
+                        result = quantizer.scalarQuantize(vector, scratch, quantized, quantEncoding.bits(), overspillCentroid);
+                        if (overspillParentCentroid != null) {
+                            float additionalCorrection = vectorSimilarityFunction == VectorSimilarityFunction.EUCLIDEAN
+                                ? ESVectorUtil.squareDistance(vector, overspillParentCentroid)
+                                : ESVectorUtil.dotProduct(scratch, overspillParentCentroid);
+                            result = new OptimizedScalarQuantizer.QuantizationResult(
+                                result.lowerInterval(),
+                                result.upperInterval(),
+                                additionalCorrection,
+                                result.quantizedComponentSum()
+                            );
+                        }
+                        quantEncoding.pack(quantized, binary);
+                        writeQuantizedValue(quantizedVectorsTemp, binary, result);
+                    } else {
+                        Arrays.fill(binary, (byte) 0);
+                        OptimizedScalarQuantizer.QuantizationResult zeroResult = new OptimizedScalarQuantizer.QuantizationResult(
+                            0f,
+                            0f,
+                            0f,
+                            0
+                        );
+                        writeQuantizedValue(quantizedVectorsTemp, binary, zeroResult);
+                    }
                 }
             }
         } catch (Throwable t) {
@@ -1145,6 +1196,9 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     static class OnHeapQuantizedVectors implements QuantizedVectorValues {
         private final FloatVectorValues vectorValues;
+        // Non-null when vectorValues provides non-COSINE byte vectors,
+        // enabling native byte[] quantization that avoids the byte-to-float copy.
+        private final KMeansFloatVectorValues byteBackedKMeans;
         private final OptimizedScalarQuantizer quantizer;
         private final byte[] quantizedVector;
         private final int[] quantizedVectorScratch;
@@ -1165,6 +1219,12 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             OptimizedScalarQuantizer quantizer
         ) {
             this.vectorValues = vectorValues;
+            // Detect byte-backed sources that can use native byte[] quantization.
+            // For COSINE, normalization is required so we cannot use the raw byte path.
+            this.byteBackedKMeans = vectorValues instanceof KMeansFloatVectorValues km
+                && km.isByteBacked()
+                && km.isPreconditioned() == false
+                && similarityFunction != VectorSimilarityFunction.COSINE ? km : null;
             this.similarityFunction = similarityFunction;
             this.encoding = encoding;
             this.quantizer = quantizer;
@@ -1195,19 +1255,50 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             }
             currOrd++;
             int ord = ordTransformer.apply(currOrd);
-            float[] vector = vectorValues.vectorValue(ord);
-            corrections = quantizer.scalarQuantize(vector, floatVectorScratch, quantizedVectorScratch, encoding.bits(), currentCentroid);
-            // note, with a parent centroid, our correction needs to take it into account
-            if (currentParentCentroid != null) {
-                float additionalCorrection = similarityFunction == VectorSimilarityFunction.EUCLIDEAN
-                    ? ESVectorUtil.squareDistance(vector, currentParentCentroid)
-                    : ESVectorUtil.dotProduct(floatVectorScratch, currentParentCentroid);
-                corrections = new OptimizedScalarQuantizer.QuantizationResult(
-                    corrections.lowerInterval(),
-                    corrections.upperInterval(),
-                    additionalCorrection,
-                    corrections.quantizedComponentSum()
+            if (byteBackedKMeans != null) {
+                byte[] byteVector = byteBackedKMeans.byteVectorValue(ord);
+                corrections = quantizer.scalarQuantize(
+                    byteVector,
+                    floatVectorScratch,
+                    quantizedVectorScratch,
+                    encoding.bits(),
+                    currentCentroid
                 );
+                if (currentParentCentroid != null) {
+                    // floatVectorScratch now holds the centered residual from scalarQuantize;
+                    // for EUCLIDEAN we need squareDistance(original_float_vector, parentCentroid),
+                    // so we must fall back to the float[] vector for that computation.
+                    float[] vector = vectorValues.vectorValue(ord);
+                    float additionalCorrection = similarityFunction == VectorSimilarityFunction.EUCLIDEAN
+                        ? ESVectorUtil.squareDistance(vector, currentParentCentroid)
+                        : ESVectorUtil.dotProduct(floatVectorScratch, currentParentCentroid);
+                    corrections = new OptimizedScalarQuantizer.QuantizationResult(
+                        corrections.lowerInterval(),
+                        corrections.upperInterval(),
+                        additionalCorrection,
+                        corrections.quantizedComponentSum()
+                    );
+                }
+            } else {
+                float[] vector = vectorValues.vectorValue(ord);
+                corrections = quantizer.scalarQuantize(
+                    vector,
+                    floatVectorScratch,
+                    quantizedVectorScratch,
+                    encoding.bits(),
+                    currentCentroid
+                );
+                if (currentParentCentroid != null) {
+                    float additionalCorrection = similarityFunction == VectorSimilarityFunction.EUCLIDEAN
+                        ? ESVectorUtil.squareDistance(vector, currentParentCentroid)
+                        : ESVectorUtil.dotProduct(floatVectorScratch, currentParentCentroid);
+                    corrections = new OptimizedScalarQuantizer.QuantizationResult(
+                        corrections.lowerInterval(),
+                        corrections.upperInterval(),
+                        additionalCorrection,
+                        corrections.quantizedComponentSum()
+                    );
+                }
             }
             encoding.pack(quantizedVectorScratch, quantizedVector);
             return quantizedVector;

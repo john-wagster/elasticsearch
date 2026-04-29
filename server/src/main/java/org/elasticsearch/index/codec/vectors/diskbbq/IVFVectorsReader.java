@@ -18,6 +18,7 @@ import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FieldInfos;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.IndexFileNames;
+import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
@@ -136,13 +137,42 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
         IndexInput postingListSlice,
         AcceptDocs acceptDocs,
         float approximateCost,
-        FloatVectorValues values,
+        KnnVectorValues values,
         float visitRatio
     ) throws IOException;
 
+    /**
+     * Get the centroid iterator for a byte query vector. Subclasses may override to use native byte[]
+     * quantization. The default converts byte[] to float[] and delegates to the float overload.
+     */
+    public CentroidIterator getCentroidIterator(
+        FieldInfo fieldInfo,
+        int numCentroids,
+        IndexInput centroids,
+        byte[] byteTarget,
+        float[] floatTarget,
+        IndexInput postingListSlice,
+        AcceptDocs acceptDocs,
+        float approximateCost,
+        KnnVectorValues values,
+        float visitRatio
+    ) throws IOException {
+        return getCentroidIterator(
+            fieldInfo,
+            numCentroids,
+            centroids,
+            floatTarget,
+            postingListSlice,
+            acceptDocs,
+            approximateCost,
+            values,
+            visitRatio
+        );
+    }
+
     /** Get the number of vectors to search, which is typically the total number of vectors in the segment or the
      *  number of vectors in a slice if the segment is sliced.*/
-    protected int getNumberOfVectors(E entry, FloatVectorValues values, IndexInput centroidSlice, ESAcceptDocs esAcceptDocs)
+    protected int getNumberOfVectors(E entry, KnnVectorValues values, IndexInput centroidSlice, ESAcceptDocs esAcceptDocs)
         throws IOException {
         return values.size();
     }
@@ -311,6 +341,19 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
             getReaderForField(field).search(field, target, knnCollector, acceptDocs);
             return;
         }
+        doSearch(field, null, target, knnCollector, acceptDocs);
+    }
+
+    /**
+     * Shared IVF search implementation. When {@code byteTarget} is non-null, native byte[] quantization
+     * is used for centroid scoring and query quantization, avoiding intermediate byte-to-float conversion.
+     */
+    private void doSearch(String field, byte[] byteTarget, float[] target, KnnCollector knnCollector, AcceptDocs acceptDocs)
+        throws IOException {
+        final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
+        if (fieldInfo == null || fieldInfo.getVectorDimension() == 0) {
+            return;
+        }
         final E entry = fields.get(fieldInfo.number);
         if (hasNoVectors(fieldInfo, entry)) {
             return;
@@ -328,10 +371,9 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
             esAcceptDocs = null;
         }
 
-        final FloatVectorValues values;
+        final KnnVectorValues values;
         if (fieldInfo.getVectorEncoding().equals(VectorEncoding.BYTE)) {
-            ByteVectorValues byteValues = getByteVectorValues(field);
-            values = byteValues != null ? new ByteToFloatVectorValues(byteValues) : null;
+            values = getByteVectorValues(field);
         } else {
             values = getFloatVectorValues(field);
         }
@@ -366,27 +408,57 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
         // we account for soar vectors here. We can potentially visit a vector twice so we multiply by 2 here.
         long maxVectorVisited = (long) (2.0 * visitRatio * numVectors);
         IndexInput postListSlice = entry.postingListSlice(ivfClusters);
-        CentroidIterator centroidPrefetchingIterator = getCentroidIterator(
-            fieldInfo,
-            entry.numCentroids,
-            centroids,
-            target,
-            postListSlice,
-            acceptDocs,
-            approximateCost,
-            values,
-            visitRatio
-        );
+        CentroidIterator centroidPrefetchingIterator;
+        if (byteTarget != null) {
+            centroidPrefetchingIterator = getCentroidIterator(
+                fieldInfo,
+                entry.numCentroids,
+                centroids,
+                byteTarget,
+                target,
+                postListSlice,
+                acceptDocs,
+                approximateCost,
+                values,
+                visitRatio
+            );
+        } else {
+            centroidPrefetchingIterator = getCentroidIterator(
+                fieldInfo,
+                entry.numCentroids,
+                centroids,
+                target,
+                postListSlice,
+                acceptDocs,
+                approximateCost,
+                values,
+                visitRatio
+            );
+        }
         Bits acceptDocsBits = acceptDocs.bits();
-        PostingVisitor scorer = getPostingVisitor(
-            fieldInfo,
-            values,
-            postListSlice,
-            target,
-            acceptDocsBits,
-            entry.centroidSlice(ivfCentroids),
-            esAcceptDocs
-        );
+        PostingVisitor scorer;
+        if (byteTarget != null) {
+            scorer = getPostingVisitor(
+                fieldInfo,
+                values,
+                postListSlice,
+                byteTarget,
+                target,
+                acceptDocsBits,
+                entry.centroidSlice(ivfCentroids),
+                esAcceptDocs
+            );
+        } else {
+            scorer = getPostingVisitor(
+                fieldInfo,
+                values,
+                postListSlice,
+                target,
+                acceptDocsBits,
+                entry.centroidSlice(ivfCentroids),
+                esAcceptDocs
+            );
+        }
         long expectedDocs = 0;
         long actualDocs = 0;
         // initially we visit only the "centroids to search"
@@ -463,20 +535,21 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
         final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
         FieldEntry entry = fields.get(fieldInfo.number);
         if (entry != null && entry.numCentroids > 0) {
-            // Convert byte query to float and use the IVF search path
+            // Convert byte query to float for the IVF search path
             float[] floatTarget = new float[target.length];
             for (int i = 0; i < target.length; i++) {
                 floatTarget[i] = target[i];
             }
-            // For cosine similarity, the IVF pipeline indexes L2-normalized byte-to-float vectors.
-            // The query vector must also be normalized to match.
-            if (fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE) {
+            boolean isCosine = fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE;
+            if (isCosine) {
+                // For cosine similarity, the IVF pipeline indexes L2-normalized byte-to-float vectors.
+                // The query vector must also be normalized to match.
                 VectorUtil.l2normalize(floatTarget);
             }
-            search(field, floatTarget, knnCollector, acceptDocs);
+            // For non-COSINE, pass the original byte[] through to use native byte quantization
+            doSearch(field, isCosine ? null : target, floatTarget, knnCollector, acceptDocs);
         } else {
             getReaderForField(field).search(field, target, knnCollector, acceptDocs);
-
         }
     }
 
@@ -582,13 +655,30 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
 
     public abstract PostingVisitor getPostingVisitor(
         FieldInfo fieldInfo,
-        FloatVectorValues values,
+        KnnVectorValues values,
         IndexInput postingsLists,
         float[] target,
         Bits needsScoring,
         IndexInput centroidSlice,
         ESAcceptDocs acceptDocs
     ) throws IOException;
+
+    /**
+     * Get the posting visitor for a byte query vector. Subclasses may override to use native byte[]
+     * quantization. The default delegates to the float overload.
+     */
+    public PostingVisitor getPostingVisitor(
+        FieldInfo fieldInfo,
+        KnnVectorValues values,
+        IndexInput postingsLists,
+        byte[] byteTarget,
+        float[] floatTarget,
+        Bits needsScoring,
+        IndexInput centroidSlice,
+        ESAcceptDocs acceptDocs
+    ) throws IOException {
+        return getPostingVisitor(fieldInfo, values, postingsLists, floatTarget, needsScoring, centroidSlice, acceptDocs);
+    }
 
     public interface PostingVisitor {
         /** returns the number of documents in the posting list */
