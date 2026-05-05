@@ -191,9 +191,74 @@ public class ESNextDiskBBQByteVectorsFormatTests extends BaseKnnVectorsFormatTes
         }
     }
 
+    /**
+     * Deterministic test for byte vectors with COSINE similarity and preconditioning enabled.
+     * This combination exercises the most complex path: byte→float→normalize→precondition→quantize.
+     */
+    public void testByteVectorCosineWithPreconditioning() throws IOException {
+        int dimensions = random().nextInt(32, 256);
+        int numDocs = random().nextInt(200, 600);
+        ESNextDiskBBQVectorsFormat.QuantEncoding encoding = ESNextDiskBBQVectorsFormat.QuantEncoding.values()[random().nextInt(
+            ESNextDiskBBQVectorsFormat.QuantEncoding.values().length
+        )];
+        KnnVectorsFormat cosineFormat = new ESNextDiskBBQVectorsFormat(
+            encoding,
+            random().nextInt(MIN_VECTORS_PER_CLUSTER, MAX_VECTORS_PER_CLUSTER),
+            random().nextInt(MIN_CENTROIDS_PER_PARENT_CLUSTER, MAX_CENTROIDS_PER_PARENT_CLUSTER),
+            DenseVectorFieldMapper.ElementType.BYTE,
+            false,
+            null,
+            1,
+            true,  // doPrecondition = true (deterministic)
+            random().nextInt(MIN_PRECONDITIONING_BLOCK_DIMS, MAX_PRECONDITIONING_BLOCK_DIMS),
+            null
+        );
+        Codec codec = TestUtil.alwaysKnnVectorsFormat(cosineFormat);
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig().setCodec(codec))) {
+            for (int i = 0; i < numDocs; i++) {
+                byte[] vector = randomNonZeroByteVector(dimensions);
+                Document doc = new Document();
+                doc.add(new KnnByteVectorField("f", vector, VectorSimilarityFunction.COSINE));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                for (LeafReaderContext r : reader.leaves()) {
+                    LeafReader leafReader = r.reader();
+                    byte[] queryVector = randomNonZeroByteVector(dimensions);
+                    TopDocs topDocs = leafReader.searchNearestVectors(
+                        "f",
+                        queryVector,
+                        10,
+                        AcceptDocs.fromLiveDocs(leafReader.getLiveDocs(), leafReader.maxDoc()),
+                        Integer.MAX_VALUE
+                    );
+                    assertEquals(Math.min(leafReader.maxDoc(), 10), topDocs.scoreDocs.length);
+                }
+            }
+        }
+    }
+
     private static byte[] randomByteVector(int dimensions) {
         byte[] vector = new byte[dimensions];
         random().nextBytes(vector);
         return vector;
+    }
+
+    /** Returns a random byte vector guaranteed to have non-zero L2 norm (required for COSINE). */
+    private static byte[] randomNonZeroByteVector(int dimensions) {
+        byte[] vector = new byte[dimensions];
+        do {
+            random().nextBytes(vector);
+        } while (isZeroVector(vector));
+        return vector;
+    }
+
+    private static boolean isZeroVector(byte[] v) {
+        for (byte b : v) {
+            if (b != 0) return false;
+        }
+        return true;
     }
 }

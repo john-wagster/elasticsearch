@@ -147,6 +147,11 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
      * When preconditioned, {@link #byteVectorValue(int)} returns raw (un-preconditioned) bytes,
      * so native byte quantization must NOT be used — callers should use
      * {@link #vectorValue(int)} which returns the preconditioned float vector.
+     * <p>
+     * Note: even when this returns {@code false}, native byte quantization may still be
+     * inappropriate. For COSINE similarity, {@link #vectorValue(int)} returns L2-normalized
+     * floats which differ from the raw byte values returned by {@link #byteVectorValue(int)}.
+     * Callers must additionally check the similarity function before using the byte path.
      */
     public boolean isPreconditioned() {
         if (vectors instanceof OnHeapByteVectorSupplier s) {
@@ -161,13 +166,9 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
     /**
      * Returns the raw byte vector for the given ordinal without conversion to float.
      * Only valid when {@link #isByteBacked()} returns true.
-     *
-     * @throws IllegalStateException if this instance is not byte-backed
      */
     public byte[] byteVectorValue(int ord) throws IOException {
-        if (byteSupplier == null) {
-            throw new IllegalStateException("not byte-backed");
-        }
+        assert byteSupplier != null;
         return byteSupplier.byteVector(ord);
     }
 

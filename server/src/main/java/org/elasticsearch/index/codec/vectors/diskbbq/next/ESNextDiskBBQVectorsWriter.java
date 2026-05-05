@@ -369,10 +369,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             byte[] binary = new byte[quantEncoding.getDocPackedLength(fieldInfo.getVectorDimension())];
             float[] scratch = new float[fieldInfo.getVectorDimension()];
             // Use native byte[] quantization when the float values are byte-backed without preconditioning (non-COSINE)
-            KMeansFloatVectorValues byteBackedValues = floatVectorValues instanceof KMeansFloatVectorValues km
-                && km.isByteBacked()
-                && km.isPreconditioned() == false
-                && vectorSimilarityFunction != VectorSimilarityFunction.COSINE ? km : null;
+            KMeansFloatVectorValues byteBackedValues = asByteBackedOrNull(floatVectorValues, vectorSimilarityFunction);
             for (int i = 0; i < assignments.length; i++) {
                 int c = assignments[i];
                 float[] centroid = centroidSupplier.centroid(c);
@@ -1221,10 +1218,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             this.vectorValues = vectorValues;
             // Detect byte-backed sources that can use native byte[] quantization.
             // For COSINE, normalization is required so we cannot use the raw byte path.
-            this.byteBackedKMeans = vectorValues instanceof KMeansFloatVectorValues km
-                && km.isByteBacked()
-                && km.isPreconditioned() == false
-                && similarityFunction != VectorSimilarityFunction.COSINE ? km : null;
+            this.byteBackedKMeans = asByteBackedOrNull(vectorValues, similarityFunction);
             this.similarityFunction = similarityFunction;
             this.encoding = encoding;
             this.quantizer = quantizer;
@@ -1374,5 +1368,24 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             quantizedVectorsInput.readFloats(corrections, 0, 3);
             bitSum = quantizedVectorsInput.readInt();
         }
+    }
+
+    /**
+     * Returns the given values as a {@link KMeansFloatVectorValues} suitable for native byte[]
+     * quantization, or {@code null} if the values are not eligible. Eligibility requires:
+     * <ul>
+     *   <li>The values are byte-backed (originally int8 element type)</li>
+     *   <li>No preconditioning is applied (raw bytes match indexed representation)</li>
+     *   <li>Similarity is not COSINE (COSINE requires L2-normalized floats, not raw bytes)</li>
+     * </ul>
+     */
+    static KMeansFloatVectorValues asByteBackedOrNull(FloatVectorValues values, VectorSimilarityFunction similarity) {
+        if (values instanceof KMeansFloatVectorValues km
+            && km.isByteBacked()
+            && km.isPreconditioned() == false
+            && similarity != VectorSimilarityFunction.COSINE) {
+            return km;
+        }
+        return null;
     }
 }

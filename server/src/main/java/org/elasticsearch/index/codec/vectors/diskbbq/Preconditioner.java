@@ -43,26 +43,7 @@ public class Preconditioner {
         if (blocks.length == 1) {
             matrixVectorMultiply(blocks[0], vector, out);
         } else {
-            int blockIdx = 0;
-            float[] x = new float[blockDim];
-            float[] blockOut = new float[blockDim];
-            for (int j = 0; j < blocks.length; j++) {
-                float[][] block = blocks[j];
-                int blockDim = blocks[j].length;
-                // blockDim is only ever smaller for the tail
-                if (blockDim != this.blockDim) {
-                    x = new float[blockDim];
-                    blockOut = new float[blockDim];
-                }
-                for (int k = 0; k < permutationMatrix[j].length; k++) {
-                    int idx = permutationMatrix[j][k];
-                    x[k] = vector[idx];
-                }
-                // TODO: can be optimized to do all blocks in one pass?
-                matrixVectorMultiply(block, x, blockOut);
-                System.arraycopy(blockOut, 0, out, blockIdx, blockDim);
-                blockIdx += blockDim;
-            }
+            applyMultiBlock(i -> vector[i], out);
         }
     }
 
@@ -83,24 +64,33 @@ public class Preconditioner {
         if (blocks.length == 1) {
             matrixVectorMultiplyBytes(blocks[0], vector, out);
         } else {
-            int blockIdx = 0;
-            float[] x = new float[blockDim];
-            float[] blockOut = new float[blockDim];
-            for (int j = 0; j < blocks.length; j++) {
-                float[][] block = blocks[j];
-                int blockDim = blocks[j].length;
-                if (blockDim != this.blockDim) {
-                    x = new float[blockDim];
-                    blockOut = new float[blockDim];
-                }
-                for (int k = 0; k < permutationMatrix[j].length; k++) {
-                    int idx = permutationMatrix[j][k];
-                    x[k] = vector[idx];
-                }
-                matrixVectorMultiply(block, x, blockOut);
-                System.arraycopy(blockOut, 0, out, blockIdx, blockDim);
-                blockIdx += blockDim;
+            applyMultiBlock(i -> (float) vector[i], out);
+        }
+    }
+
+    /**
+     * Shared multi-block rotation loop. Extracts input elements via {@code elementAt} to support
+     * both float[] and byte[] source vectors.
+     */
+    private void applyMultiBlock(java.util.function.IntToDoubleFunction elementAt, float[] out) {
+        int blockIdx = 0;
+        float[] x = new float[blockDim];
+        float[] blockOut = new float[blockDim];
+        for (int j = 0; j < blocks.length; j++) {
+            float[][] block = blocks[j];
+            int blockDim = blocks[j].length;
+            if (blockDim != this.blockDim) {
+                x = new float[blockDim];
+                blockOut = new float[blockDim];
             }
+            for (int k = 0; k < permutationMatrix[j].length; k++) {
+                int idx = permutationMatrix[j][k];
+                x[k] = (float) elementAt.applyAsDouble(idx);
+            }
+            // TODO: can be optimized to do all blocks in one pass?
+            matrixVectorMultiply(block, x, blockOut);
+            System.arraycopy(blockOut, 0, out, blockIdx, blockDim);
+            blockIdx += blockDim;
         }
     }
 
