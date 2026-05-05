@@ -31,6 +31,7 @@ import org.elasticsearch.index.codec.vectors.cluster.NeighborQueue;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIterator;
 import org.elasticsearch.index.codec.vectors.diskbbq.DocIdsWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader;
+import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader.QueryTarget;
 import org.elasticsearch.index.codec.vectors.diskbbq.PostingMetadata;
 import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
 import org.elasticsearch.index.codec.vectors.diskbbq.PrefetchingCentroidIterator;
@@ -101,13 +102,15 @@ public class ES940DiskBBQVectorsReader extends IVFVectorsReader<ES940DiskBBQVect
         FieldInfo fieldInfo,
         int numCentroids,
         IndexInput centroids,
-        float[] targetQuery,
+        QueryTarget queryTarget,
         IndexInput postingListSlice,
         AcceptDocs acceptDocs,
         float approximateCost,
         KnnVectorValues values,
         float visitRatio
     ) throws IOException {
+        assert queryTarget instanceof QueryTarget.FloatQuery : "older codecs do not support byte vectors";
+        float[] targetQuery = ((QueryTarget.FloatQuery) queryTarget).vector();
         final NextFieldEntry fieldEntry = fields.get(fieldInfo.number);
         int bulkSize = fieldEntry.getBulkSize();
         float approximateDocsPerCentroid = approximateCost / numCentroids;
@@ -598,11 +601,13 @@ public class ES940DiskBBQVectorsReader extends IVFVectorsReader<ES940DiskBBQVect
         FieldInfo fieldInfo,
         KnnVectorValues values,
         IndexInput indexInput,
-        float[] target,
+        QueryTarget queryTarget,
         Bits acceptDocs,
         IndexInput centroidSlice,
         ESAcceptDocs esAcceptDocs
     ) throws IOException {
+        assert queryTarget instanceof QueryTarget.FloatQuery : "older codecs do not support byte vectors";
+        float[] target = ((QueryTarget.FloatQuery) queryTarget).vector();
         NextFieldEntry entry = fields.get(fieldInfo.number);
         final int bitsRequired = DirectWriter.bitsRequired(entry.numCentroids());
         final long sizeLookup = DirectWriter.bytesRequired(values.size(), bitsRequired);
@@ -623,7 +628,7 @@ public class ES940DiskBBQVectorsReader extends IVFVectorsReader<ES940DiskBBQVect
             queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, null, entry.globalCentroid());
         }
 
-        return new MemorySegmentPostingsVisitor(queryQuantizer, quantEncoding, indexInput, entry, fieldInfo, acceptDocs);
+        return new MemorySegmentPostingsVisitor(queryQuantizer, quantEncoding, indexInput, fieldInfo, acceptDocs);
     }
 
     private record QueryQuantizerResult(OptimizedScalarQuantizer.QuantizationResult queryCorrections, byte[] quantizedTarget) {}
@@ -730,7 +735,6 @@ public class ES940DiskBBQVectorsReader extends IVFVectorsReader<ES940DiskBBQVect
     private static class MemorySegmentPostingsVisitor implements PostingVisitor {
         final long quantizedByteLength;
         final IndexInput indexInput;
-        final FieldEntry entry;
         final FieldInfo fieldInfo;
         final Bits acceptDocs;
         private final ES940OSQVectorsScorer osqVectorsScorer;
@@ -752,21 +756,18 @@ public class ES940DiskBBQVectorsReader extends IVFVectorsReader<ES940DiskBBQVect
         private final QueryQuantizer queryQuantizer;
         final DocIdsWriter idsWriter = new DocIdsWriter();
         final VectorSimilarityFunction similarityFunction;
-        final float[] correctiveValues = new float[3];
         final long quantizedVectorByteSize;
 
         MemorySegmentPostingsVisitor(
             QueryQuantizer queryQuantizer,
             ES940DiskBBQVectorsFormat.QuantEncoding quantEncoding,
             IndexInput indexInput,
-            FieldEntry entry,
             FieldInfo fieldInfo,
             Bits acceptDocs
         ) throws IOException {
             this.queryQuantizer = queryQuantizer;
             this.indexInput = indexInput;
             this.similarityFunction = fieldInfo.getVectorSimilarityFunction();
-            this.entry = entry;
             this.fieldInfo = fieldInfo;
             this.acceptDocs = acceptDocs;
             quantizedVectorByteSize = quantEncoding.getDocPackedLength(fieldInfo.getVectorDimension());

@@ -50,8 +50,27 @@ import static org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader.SIMILA
  */
 public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> extends KnnVectorsReader {
 
+    /**
+     * Represents the query vector target for IVF search, abstracting over byte[] and float[] representations.
+     */
+    public sealed interface QueryTarget {
+        int dimension();
+
+        record ByteQuery(byte[] vector) implements QueryTarget {
+            public int dimension() {
+                return vector.length;
+            }
+        }
+
+        record FloatQuery(float[] vector) implements QueryTarget {
+            public int dimension() {
+                return vector.length;
+            }
+        }
+    }
+
     // Two-Signal Model constants for dynamic visit ratio computation.
-    // Computes a visit ratio from the num_candidates/k ratio and k magnitude.
+    // Computes a visit ratio from the num_candidates/k ratio signal.
     private static final double V_MIN = 0.003;
     private static final double V_MAX = 0.04;
     private static final double LOG1P_R_MAX = Math.log1p(10.0);
@@ -133,32 +152,13 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
         FieldInfo fieldInfo,
         int numCentroids,
         IndexInput centroids,
-        float[] target,
+        QueryTarget queryTarget,
         IndexInput postingListSlice,
         AcceptDocs acceptDocs,
         float approximateCost,
         KnnVectorValues values,
         float visitRatio
     ) throws IOException;
-
-    /**
-     * Get the centroid iterator for a byte query vector. Subclasses must override to use native byte[]
-     * quantization. The base class has no float[] fallback — legacy codecs that don't support byte
-     * vectors will never reach this method (byte+bbq_disk is gated by a cluster feature on ESNext only).
-     */
-    public CentroidIterator getCentroidIterator(
-        FieldInfo fieldInfo,
-        int numCentroids,
-        IndexInput centroids,
-        byte[] byteTarget,
-        IndexInput postingListSlice,
-        AcceptDocs acceptDocs,
-        float approximateCost,
-        KnnVectorValues values,
-        float visitRatio
-    ) throws IOException {
-        throw new UnsupportedOperationException("byte vector search requires subclass override");
-    }
 
     /** Get the number of vectors to search, which is typically the total number of vectors in the segment or the
      *  number of vectors in a slice if the segment is sliced.*/
@@ -320,36 +320,69 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
         return getReaderForField(field).getByteVectorValues(field);
     }
 
-    @Override
-    public final void search(String field, float[] target, KnnCollector knnCollector, AcceptDocs acceptDocs) throws IOException {
-        final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
-        if (fieldInfo == null || fieldInfo.getVectorDimension() == 0) {
-            return;
-        }
-        if (fields.get(fieldInfo.number) == null || fields.get(fieldInfo.number).numCentroids == 0) {
-            // no IVF structure for this field; fall back to the raw delegate
-            getReaderForField(field).search(field, target, knnCollector, acceptDocs);
-            return;
-        }
-        doSearch(field, null, target, knnCollector, acceptDocs);
+    /**
+     * Returns true if this reader supports byte[] vector search
+     */
+    protected boolean supportsByteVectorSearch() {
+        return false;
     }
 
     /**
-     * Shared IVF search implementation. When {@code byteTarget} is non-null, native byte[] quantization
-     * is used for centroid scoring and query quantization, avoiding intermediate byte-to-float conversion.
-     * Exactly one of {@code byteTarget} or {@code target} must be non-null.
+     * Returns true if this field has an IVF structure (centroids), false if it should fall back to the raw delegate.
      */
-    private void doSearch(String field, byte[] byteTarget, float[] target, KnnCollector knnCollector, AcceptDocs acceptDocs)
-        throws IOException {
+    private boolean hasIvfStructure(String field) {
         final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
         if (fieldInfo == null || fieldInfo.getVectorDimension() == 0) {
-            return;
+            return false;
         }
+        FieldEntry entry = fields.get(fieldInfo.number);
+        return entry != null && entry.numCentroids > 0;
+    }
+
+    @Override
+    public final void search(String field, float[] target, KnnCollector knnCollector, AcceptDocs acceptDocs) throws IOException {
+        if (hasIvfStructure(field)) {
+            doSearch(field, new QueryTarget.FloatQuery(target), knnCollector, acceptDocs);
+        } else {
+            getReaderForField(field).search(field, target, knnCollector, acceptDocs);
+        }
+    }
+
+    @Override
+    public final void search(String field, byte[] target, KnnCollector knnCollector, AcceptDocs acceptDocs) throws IOException {
+        if (hasIvfStructure(field)) {
+            final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
+            if (supportsByteVectorSearch() && fieldInfo.getVectorSimilarityFunction() != VectorSimilarityFunction.COSINE) {
+                doSearch(field, new QueryTarget.ByteQuery(target), knnCollector, acceptDocs);
+            } else {
+                // for COSINE convert byte to float and normalize
+                // Note: For IVF queries, COSINE normalization is handled upstream in IVFKnnByteVectorQuery
+                // which routes through the float[] search path. This branch exists as a safety net for
+                // callers that invoke search(byte[]) directly (e.g. tests).
+                float[] floatTarget;
+                if (fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE) {
+                    floatTarget = cosineNormalize(target);
+                } else {
+                    floatTarget = byteToFloat(target);
+                }
+                doSearch(field, new QueryTarget.FloatQuery(floatTarget), knnCollector, acceptDocs);
+            }
+        } else {
+            getReaderForField(field).search(field, target, knnCollector, acceptDocs);
+        }
+    }
+
+    /**
+     * Shared IVF search implementation. Uses the sealed {@link QueryTarget} to dispatch between
+     * native byte[] quantization and float[] quantization paths.
+     */
+    private void doSearch(String field, QueryTarget queryTarget, KnnCollector knnCollector, AcceptDocs acceptDocs) throws IOException {
+        final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
         final E entry = fields.get(fieldInfo.number);
         if (hasNoVectors(fieldInfo, entry)) {
             return;
         }
-        final int queryDimension = target != null ? target.length : byteTarget.length;
+        final int queryDimension = queryTarget.dimension();
         if (fieldInfo.getVectorDimension() != queryDimension) {
             throw new IllegalArgumentException(
                 "vector query dimension: " + queryDimension + " differs from field dimension: " + fieldInfo.getVectorDimension()
@@ -400,55 +433,27 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
         // we account for soar vectors here. We can potentially visit a vector twice so we multiply by 2 here.
         long maxVectorVisited = (long) (2.0 * visitRatio * numVectors);
         IndexInput postListSlice = entry.postingListSlice(ivfClusters);
-        CentroidIterator centroidPrefetchingIterator;
-        if (byteTarget != null) {
-            centroidPrefetchingIterator = getCentroidIterator(
-                fieldInfo,
-                entry.numCentroids,
-                centroids,
-                byteTarget,
-                postListSlice,
-                acceptDocs,
-                approximateCost,
-                values,
-                visitRatio
-            );
-        } else {
-            centroidPrefetchingIterator = getCentroidIterator(
-                fieldInfo,
-                entry.numCentroids,
-                centroids,
-                target,
-                postListSlice,
-                acceptDocs,
-                approximateCost,
-                values,
-                visitRatio
-            );
-        }
+        CentroidIterator centroidPrefetchingIterator = getCentroidIterator(
+            fieldInfo,
+            entry.numCentroids,
+            centroids,
+            queryTarget,
+            postListSlice,
+            acceptDocs,
+            approximateCost,
+            values,
+            visitRatio
+        );
         Bits acceptDocsBits = acceptDocs.bits();
-        PostingVisitor scorer;
-        if (byteTarget != null) {
-            scorer = getPostingVisitor(
-                fieldInfo,
-                values,
-                postListSlice,
-                byteTarget,
-                acceptDocsBits,
-                entry.centroidSlice(ivfCentroids),
-                esAcceptDocs
-            );
-        } else {
-            scorer = getPostingVisitor(
-                fieldInfo,
-                values,
-                postListSlice,
-                target,
-                acceptDocsBits,
-                entry.centroidSlice(ivfCentroids),
-                esAcceptDocs
-            );
-        }
+        PostingVisitor scorer = getPostingVisitor(
+            fieldInfo,
+            values,
+            postListSlice,
+            queryTarget,
+            acceptDocsBits,
+            entry.centroidSlice(ivfCentroids),
+            esAcceptDocs
+        );
         long expectedDocs = 0;
         long actualDocs = 0;
         // initially we visit only the "centroids to search"
@@ -520,31 +525,25 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
         return (float) Math.min(1.0, CAP_COEFFICIENT * sizeScale * recallScale);
     }
 
-    @Override
-    public final void search(String field, byte[] target, KnnCollector knnCollector, AcceptDocs acceptDocs) throws IOException {
-        final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
-        if (fieldInfo == null || fieldInfo.getVectorDimension() == 0) {
-            return;
+    /**
+     * Converts a byte[] query vector to a float[] and L2-normalizes it for COSINE similarity search.
+     */
+    private static float[] cosineNormalize(byte[] target) {
+        // TODO:
+        float[] result = new float[target.length];
+        for (int i = 0; i < target.length; i++) {
+            result[i] = target[i];
         }
-        FieldEntry entry = fields.get(fieldInfo.number);
-        if (entry != null && entry.numCentroids > 0) {
-            boolean isCosine = fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE;
-            if (isCosine) {
-                // COSINE disables the native byte path: the IVF pipeline indexes L2-normalized
-                // byte-to-float vectors, so the query must also be normalized floats to match.
-                float[] floatTarget = new float[target.length];
-                for (int i = 0; i < target.length; i++) {
-                    floatTarget[i] = target[i];
-                }
-                VectorUtil.l2normalize(floatTarget);
-                doSearch(field, null, floatTarget, knnCollector, acceptDocs);
-            } else {
-                // Non-COSINE: use native byte[] quantization throughout, no float[] needed
-                doSearch(field, target, null, knnCollector, acceptDocs);
-            }
-        } else {
-            getReaderForField(field).search(field, target, knnCollector, acceptDocs);
+        VectorUtil.l2normalize(result);
+        return result;
+    }
+
+    private static float[] byteToFloat(byte[] bytes) {
+        float[] result = new float[bytes.length];
+        for (int i = 0; i < bytes.length; i++) {
+            result[i] = bytes[i];
         }
+        return result;
     }
 
     @Override
@@ -651,28 +650,11 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
         FieldInfo fieldInfo,
         KnnVectorValues values,
         IndexInput postingsLists,
-        float[] target,
+        QueryTarget queryTarget,
         Bits needsScoring,
         IndexInput centroidSlice,
         ESAcceptDocs acceptDocs
     ) throws IOException;
-
-    /**
-     * Get the posting visitor for a byte query vector. Subclasses must override to use native byte[]
-     * quantization. The base class has no float[] fallback — legacy codecs that don't support byte
-     * vectors will never reach this method.
-     */
-    public PostingVisitor getPostingVisitor(
-        FieldInfo fieldInfo,
-        KnnVectorValues values,
-        IndexInput postingsLists,
-        byte[] byteTarget,
-        Bits needsScoring,
-        IndexInput centroidSlice,
-        ESAcceptDocs acceptDocs
-    ) throws IOException {
-        throw new UnsupportedOperationException("byte vector search requires subclass override");
-    }
 
     public interface PostingVisitor {
         /** returns the number of documents in the posting list */

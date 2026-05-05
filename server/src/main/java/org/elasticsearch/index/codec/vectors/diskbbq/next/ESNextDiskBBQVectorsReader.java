@@ -30,6 +30,7 @@ import org.elasticsearch.index.codec.vectors.cluster.NeighborQueue;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIterator;
 import org.elasticsearch.index.codec.vectors.diskbbq.DocIdsWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader;
+import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader.QueryTarget;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.PostingMetadata;
 import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
@@ -104,11 +105,16 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
     }
 
     @Override
+    protected boolean supportsByteVectorSearch() {
+        return true;
+    }
+
+    @Override
     public CentroidIterator getCentroidIterator(
         FieldInfo fieldInfo,
         int numCentroids,
         IndexInput centroids,
-        float[] targetQuery,
+        QueryTarget queryTarget,
         IndexInput postingListSlice,
         AcceptDocs acceptDocs,
         float approximateCost,
@@ -123,19 +129,29 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         // build centroid search helpers
         final int bulkSize = fieldEntry.getBulkSize();
         final OptimizedScalarQuantizer scalarQuantizer = new OptimizedScalarQuantizer(IVFVectorsWriter.effectiveSimilarity(fieldInfo));
-        final int[] scratch = new int[targetQuery.length];
-        final OptimizedScalarQuantizer.QuantizationResult queryParams = scalarQuantizer.scalarQuantize(
-            targetQuery,
-            new float[targetQuery.length],
-            scratch,
-            (byte) 7,
-            fieldEntry.globalCentroid()
-        );
-        final byte[] quantized = new byte[targetQuery.length];
+        final int dims = fieldInfo.getVectorDimension();
+        final int[] scratch = new int[dims];
+        final OptimizedScalarQuantizer.QuantizationResult queryParams = switch (queryTarget) {
+            case QueryTarget.ByteQuery byteQuery -> scalarQuantizer.scalarQuantize(
+                byteQuery.vector(),
+                new float[dims],
+                scratch,
+                (byte) 7,
+                fieldEntry.globalCentroid()
+            );
+            case QueryTarget.FloatQuery floatQuery -> scalarQuantizer.scalarQuantize(
+                floatQuery.vector(),
+                new float[dims],
+                scratch,
+                (byte) 7,
+                fieldEntry.globalCentroid()
+            );
+        };
+        final byte[] quantized = new byte[dims];
         for (int i = 0; i < quantized.length; i++) {
             quantized[i] = (byte) scratch[i];
         }
-        final ES92Int7VectorsScorer scorer = ESVectorUtil.getES92Int7VectorsScorer(centroids, fieldInfo.getVectorDimension(), bulkSize);
+        final ES92Int7VectorsScorer scorer = ESVectorUtil.getES92Int7VectorsScorer(centroids, dims, bulkSize);
         // build iterator
         CentroidIterator centroidIterator;
         if (numParents > 0) {
@@ -676,80 +692,11 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
     }
 
     @Override
-    public CentroidIterator getCentroidIterator(
-        FieldInfo fieldInfo,
-        int numCentroids,
-        IndexInput centroids,
-        byte[] byteTarget,
-        IndexInput postingListSlice,
-        AcceptDocs acceptDocs,
-        float approximateCost,
-        KnnVectorValues values,
-        float visitRatio
-    ) throws IOException {
-        final NextFieldEntry fieldEntry = fields.get(fieldInfo.number);
-        final FixedBitSet acceptCentroids = getCentroidFilter(centroids, numCentroids, values, acceptDocs, approximateCost);
-        final int numParents = centroids.readVInt();
-        final FixedBitSet acceptParents = getParentCentroidFilter(centroids, numParents, numCentroids, acceptDocs, fieldEntry.numSlices);
-        final int bulkSize = fieldEntry.getBulkSize();
-        final OptimizedScalarQuantizer scalarQuantizer = new OptimizedScalarQuantizer(IVFVectorsWriter.effectiveSimilarity(fieldInfo));
-        final int dims = fieldInfo.getVectorDimension();
-        final int[] scratch = new int[dims];
-        // Use byte[] quantization for the global centroid scoring
-        final OptimizedScalarQuantizer.QuantizationResult queryParams = scalarQuantizer.scalarQuantize(
-            byteTarget,
-            new float[dims],
-            scratch,
-            (byte) 7,
-            fieldEntry.globalCentroid()
-        );
-        final byte[] quantized = new byte[dims];
-        for (int i = 0; i < quantized.length; i++) {
-            quantized[i] = (byte) scratch[i];
-        }
-        final ES92Int7VectorsScorer scorer = ESVectorUtil.getES92Int7VectorsScorer(centroids, fieldInfo.getVectorDimension(), bulkSize);
-        CentroidIterator centroidIterator;
-        if (numParents > 0) {
-            float centroidOversampling = (float) fieldEntry.numCentroids() / (2 * numParents);
-            centroidIterator = getCentroidIteratorWithParents(
-                fieldInfo,
-                centroids,
-                numParents,
-                numCentroids,
-                scorer,
-                quantized,
-                queryParams,
-                fieldEntry.globalCentroidDp(),
-                visitRatio * centroidOversampling,
-                acceptParents,
-                acceptCentroids,
-                bulkSize
-            );
-        } else {
-            if (acceptCentroids != null && acceptParents != null) {
-                acceptCentroids.and(acceptParents);
-            }
-            centroidIterator = getCentroidIteratorNoParent(
-                fieldInfo,
-                centroids,
-                numCentroids,
-                scorer,
-                quantized,
-                queryParams,
-                fieldEntry.globalCentroidDp(),
-                acceptCentroids != null ? acceptCentroids : acceptParents,
-                bulkSize
-            );
-        }
-        return getPostingListPrefetchIterator(centroidIterator, postingListSlice);
-    }
-
-    @Override
     public PostingVisitor getPostingVisitor(
         FieldInfo fieldInfo,
         KnnVectorValues values,
         IndexInput indexInput,
-        byte[] byteTarget,
+        QueryTarget queryTarget,
         Bits needsScoring,
         IndexInput centroidSlice,
         ESAcceptDocs acceptDocs
@@ -776,9 +723,35 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 centroidSlice.getFilePointer(),
                 (long) numParents * fieldInfo.getVectorDimension() * Float.BYTES
             );
-            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, null, byteTarget, parentsSlice, entry.globalCentroid());
+            queryQuantizer = switch (queryTarget) {
+                case QueryTarget.FloatQuery fq -> new QueryQuantizer(
+                    quantEncoding,
+                    fieldInfo,
+                    fq.vector(),
+                    parentsSlice,
+                    entry.globalCentroid()
+                );
+                case QueryTarget.ByteQuery bq -> new QueryQuantizer(
+                    quantEncoding,
+                    fieldInfo,
+                    null,
+                    bq.vector(),
+                    parentsSlice,
+                    entry.globalCentroid()
+                );
+            };
         } else {
-            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, null, byteTarget, null, entry.globalCentroid());
+            queryQuantizer = switch (queryTarget) {
+                case QueryTarget.FloatQuery fq -> new QueryQuantizer(quantEncoding, fieldInfo, fq.vector(), null, entry.globalCentroid());
+                case QueryTarget.ByteQuery bq -> new QueryQuantizer(
+                    quantEncoding,
+                    fieldInfo,
+                    null,
+                    bq.vector(),
+                    null,
+                    entry.globalCentroid()
+                );
+            };
         }
         if (entry.numSlices == 0) {
             assert entry.numCentroids() == 1;
@@ -796,7 +769,6 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 queryQuantizer,
                 quantEncoding,
                 indexInput,
-                entry,
                 fieldInfo,
                 needsScoring,
                 values,
@@ -804,75 +776,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 endDoc
             );
         }
-        return new MemorySegmentPostingsVisitor(queryQuantizer, quantEncoding, indexInput, entry, fieldInfo, needsScoring);
-    }
-
-    @Override
-    public PostingVisitor getPostingVisitor(
-        FieldInfo fieldInfo,
-        KnnVectorValues values,
-        IndexInput indexInput,
-        float[] target,
-        Bits needsScoring,
-        IndexInput centroidSlice,
-        ESAcceptDocs acceptDocs
-    ) throws IOException {
-        NextFieldEntry entry = fields.get(fieldInfo.number);
-        if (entry.numSlices > 0) {
-            final int bitsRequired = DirectWriter.bitsRequired(entry.maxSliceSize);
-            final long sizeLookup = DirectWriter.bytesRequired(entry.numSlices, bitsRequired);
-            centroidSlice.skipBytes(sizeLookup);
-        }
-        final int bitsRequired = DirectWriter.bitsRequired(entry.numCentroids());
-        final long sizeLookup = DirectWriter.bytesRequired(values.size(), bitsRequired);
-        centroidSlice.skipBytes(sizeLookup);
-        ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding = entry.quantEncoding();
-        int numParents = centroidSlice.readVInt();
-        if (entry.numSlices > 0) {
-            // skip slice offsets
-            centroidSlice.skipBytes((long) entry.numSlices * Integer.BYTES);
-        }
-        final QueryQuantizer queryQuantizer;
-        if (numParents > 0) {
-            // unused
-            int longestPostingList = centroidSlice.readVInt();
-            IndexInput parentsSlice = centroidSlice.slice(
-                "parents-slice",
-                centroidSlice.getFilePointer(),
-                (long) numParents * fieldInfo.getVectorDimension() * Float.BYTES
-            );
-            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, parentsSlice, entry.globalCentroid());
-        } else {
-            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, null, entry.globalCentroid());
-        }
-        if (entry.numSlices == 0) {
-            // should only happen in sliced flushed segments
-            assert entry.numCentroids() == 1;
-            int startDoc;
-            int endDoc;
-            if (acceptDocs == null) {
-                startDoc = 0;
-                endDoc = values.ordToDoc(values.size() - 1);
-            } else {
-                ESAcceptDocs.SliceAcceptDocs sliceAcceptDocs = acceptDocs.sliceAcceptDocs();
-                startDoc = sliceAcceptDocs.startDoc();
-                endDoc = sliceAcceptDocs.endDoc();
-            }
-            return new SlicedMemorySegmentPostingsVisitor(
-                queryQuantizer,
-                quantEncoding,
-                indexInput,
-                entry,
-                fieldInfo,
-                needsScoring,
-                values,
-                startDoc,
-                endDoc
-            );
-
-        } else {
-            return new MemorySegmentPostingsVisitor(queryQuantizer, quantEncoding, indexInput, entry, fieldInfo, needsScoring);
-        }
+        return new MemorySegmentPostingsVisitor(queryQuantizer, quantEncoding, indexInput, fieldInfo, needsScoring);
     }
 
     private record QueryQuantizerResult(OptimizedScalarQuantizer.QuantizationResult queryCorrections, byte[] quantizedTarget) {}
@@ -1010,14 +914,13 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             QueryQuantizer queryQuantizer,
             ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding,
             IndexInput indexInput,
-            FieldEntry entry,
             FieldInfo fieldInfo,
             Bits acceptDocs,
             KnnVectorValues values,
             int startDocId,
             int endDocId
         ) throws IOException {
-            super(queryQuantizer, quantEncoding, indexInput, entry, fieldInfo, acceptDocs);
+            super(queryQuantizer, quantEncoding, indexInput, fieldInfo, acceptDocs);
             this.startDocId = startDocId;
             this.endDocId = endDocId;
             this.vectorValues = values;
@@ -1069,7 +972,6 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
     private static class MemorySegmentPostingsVisitor implements PostingVisitor {
         final long quantizedByteLength;
         final IndexInput indexInput;
-        final FieldEntry entry;
         final FieldInfo fieldInfo;
         final Bits acceptDocs;
         private final ES940OSQVectorsScorer osqVectorsScorer;
@@ -1097,14 +999,12 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             QueryQuantizer queryQuantizer,
             ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding,
             IndexInput indexInput,
-            FieldEntry entry,
             FieldInfo fieldInfo,
             Bits acceptDocs
         ) throws IOException {
             this.queryQuantizer = queryQuantizer;
             this.indexInput = indexInput;
             this.similarityFunction = fieldInfo.getVectorSimilarityFunction();
-            this.entry = entry;
             this.fieldInfo = fieldInfo;
             this.acceptDocs = acceptDocs;
             quantizedVectorByteSize = quantEncoding.getDocPackedLength(fieldInfo.getVectorDimension());

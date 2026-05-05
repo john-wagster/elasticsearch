@@ -69,13 +69,15 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader<IVFVectorsReader
         FieldInfo fieldInfo,
         int numCentroids,
         IndexInput centroids,
-        float[] targetQuery,
+        QueryTarget queryTarget,
         IndexInput postingListSlice,
         AcceptDocs acceptDocs,
         float approximateCost,
         KnnVectorValues values,
         float visitRatio
     ) throws IOException {
+        assert queryTarget instanceof QueryTarget.FloatQuery : "older codecs do not support byte vectors";
+        float[] targetQuery = ((QueryTarget.FloatQuery) queryTarget).vector();
         final FieldEntry fieldEntry = fields.get(fieldInfo.number);
         final float globalCentroidDp = fieldEntry.globalCentroidDp();
         final OptimizedScalarQuantizer scalarQuantizer = new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction());
@@ -377,11 +379,13 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader<IVFVectorsReader
         FieldInfo fieldInfo,
         KnnVectorValues values,
         IndexInput indexInput,
-        float[] target,
+        QueryTarget queryTarget,
         Bits acceptDocs,
         IndexInput centroidSlice,
         ESAcceptDocs esAcceptDocs
     ) throws IOException {
+        assert queryTarget instanceof QueryTarget.FloatQuery : "older codecs do not support byte vectors";
+        float[] target = ((QueryTarget.FloatQuery) queryTarget).vector();
         FieldEntry entry = fields.get(fieldInfo.number);
         // max postings list size, no longer utilized
         indexInput.readVInt();

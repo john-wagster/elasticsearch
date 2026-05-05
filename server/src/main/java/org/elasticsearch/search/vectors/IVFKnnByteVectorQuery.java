@@ -10,7 +10,6 @@ package org.elasticsearch.search.vectors;
 
 import org.apache.lucene.codecs.KnnVectorsReader;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
-import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
@@ -28,15 +27,15 @@ import java.io.IOException;
 import java.util.Arrays;
 
 /**
- * An IVF kNN query for byte-encoded vector fields. The byte query vector is passed directly
- * to the codec's {@code search(field, byte[], ...)} method, which handles byte-to-float
- * conversion and COSINE normalization internally in {@code IVFVectorsReader}.
+ * An IVF kNN query for byte-encoded vector fields. For COSINE similarity, the query vector is
+ * normalized to float[] in {@link #preconditionQuery} so the search always routes through the
+ * float path. For non-COSINE, the raw byte[] is passed directly to the codec.
  */
 public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
 
     private final byte[] query;
     private boolean isQueryPreconditioned = false;
-    private float[] preconditionedQuery;
+    private float[] preconditionedQuery = null;
 
     /**
      * Creates a new {@link IVFKnnByteVectorQuery}.
@@ -96,33 +95,49 @@ public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
             return;
         }
         LeafReader reader = context.reader();
-        SegmentReader segmentReader = Lucene.tryUnwrapSegmentReader(reader);
-        if (segmentReader == null) {
+        FieldInfo fieldInfo = reader.getFieldInfos().fieldInfo(field);
+        if (fieldInfo == null) {
             return;
         }
-        KnnVectorsReader fieldsReader = segmentReader.getVectorReader();
-        if (fieldsReader instanceof PerFieldKnnVectorsFormat.FieldsReader) {
-            KnnVectorsReader knnVectorsReader = ((PerFieldKnnVectorsFormat.FieldsReader) fieldsReader).getFieldReader(field);
-            if (knnVectorsReader instanceof VectorPreconditioner) {
-                FieldInfo fieldInfo = segmentReader.getFieldInfos().fieldInfo(field);
-                Preconditioner preconditioner = ((VectorPreconditioner) knnVectorsReader).getPreconditioner(fieldInfo);
-                if (preconditioner != null) {
-                    // Convert byte query to float for preconditioning, then store the preconditioned float query.
-                    float[] floatQuery = new float[query.length];
-                    for (int i = 0; i < query.length; i++) {
-                        floatQuery[i] = query[i];
+
+        // Attempt preconditioning via the segment's VectorPreconditioner
+        SegmentReader segmentReader = Lucene.tryUnwrapSegmentReader(reader);
+        if (segmentReader != null) {
+            KnnVectorsReader fieldsReader = segmentReader.getVectorReader();
+            if (fieldsReader instanceof PerFieldKnnVectorsFormat.FieldsReader) {
+                KnnVectorsReader knnVectorsReader = ((PerFieldKnnVectorsFormat.FieldsReader) fieldsReader).getFieldReader(field);
+                if (knnVectorsReader instanceof VectorPreconditioner) {
+                    Preconditioner preconditioner = ((VectorPreconditioner) knnVectorsReader).getPreconditioner(fieldInfo);
+                    if (preconditioner != null) {
+                        float[] out = new float[query.length];
+                        if (fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE) {
+                            float[] floatQuery = new float[query.length];
+                            for (int i = 0; i < query.length; i++) {
+                                floatQuery[i] = query[i];
+                            }
+                            VectorUtil.l2normalize(floatQuery);
+                            preconditioner.applyTransform(floatQuery, out);
+                        } else {
+                            preconditioner.applyTransform(query, out);
+                        }
+                        preconditionedQuery = out;
+                        isQueryPreconditioned = true;
+                        return;
                     }
-                    // For COSINE, the IVF pipeline indexes L2-normalized byte-to-float vectors (then preconditioned).
-                    // The query must be normalized to match before applying the same rotation.
-                    if (fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE) {
-                        VectorUtil.l2normalize(floatQuery);
-                    }
-                    float[] out = new float[query.length];
-                    preconditioner.applyTransform(floatQuery, out);
-                    preconditionedQuery = out;
-                    isQueryPreconditioned = true;
                 }
             }
+        }
+
+        // For COSINE, convert byte to float and normalize so that approximateSearch routes through the float[]
+        // search path (avoiding redundant conversion in IVFVectorsReader)
+        if (fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE) {
+            float[] normalized = new float[query.length];
+            for (int i = 0; i < query.length; i++) {
+                normalized[i] = query[i];
+            }
+            VectorUtil.l2normalize(normalized);
+            preconditionedQuery = normalized;
+            isQueryPreconditioned = true;
         }
     }
 
@@ -135,37 +150,20 @@ public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
         float visitRatio
     ) throws IOException {
         LeafReader reader = context.reader();
-        ByteVectorValues byteVectorValues = reader.getByteVectorValues(field);
-        if (byteVectorValues == null) {
-            ByteVectorValues.checkField(reader, field);
-            return NO_RESULTS;
-        }
-        if (byteVectorValues.size() == 0) {
-            return NO_RESULTS;
-        }
         IVFKnnSearchStrategy strategy = new IVFKnnSearchStrategy(visitRatio, numCands, k, knnCollectorManager.longAccumulator);
         AbstractMaxScoreKnnCollector knnCollector = knnCollectorManager.newCollector(visitedLimit, strategy, context);
         if (knnCollector == null) {
             return NO_RESULTS;
         }
         strategy.setCollector(knnCollector);
-        if (isQueryPreconditioned) {
-            SegmentReader segmentReader = Lucene.tryUnwrapSegmentReader(reader);
-            if (segmentReader != null) {
-                KnnVectorsReader fieldsReader = segmentReader.getVectorReader();
-                if (fieldsReader instanceof PerFieldKnnVectorsFormat.FieldsReader perFieldReader) {
-                    KnnVectorsReader knnVectorsReader = perFieldReader.getFieldReader(field);
-                    if (knnVectorsReader != null) {
-                        knnVectorsReader.search(field, preconditionedQuery, knnCollector, acceptDocs);
-                    }
-                } else if (fieldsReader != null) {
-                    fieldsReader.search(field, preconditionedQuery, knnCollector, acceptDocs);
-                }
-            }
+        if (preconditionedQuery != null) {
+            reader.searchNearestVectors(field, preconditionedQuery, knnCollector, acceptDocs);
         } else {
             reader.searchNearestVectors(field, query, knnCollector, acceptDocs);
         }
-        TopDocs results = knnCollector.topDocs();
+        TopDocs results = knnCollector instanceof BulkKnnCollector bulkKnnCollector
+            ? bulkKnnCollector.unsortedTopK()
+            : knnCollector.topDocs();
         return results != null ? results : NO_RESULTS;
     }
 }
