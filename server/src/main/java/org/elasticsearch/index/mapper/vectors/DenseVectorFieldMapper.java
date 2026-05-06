@@ -3182,13 +3182,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                     : new ESKnnByteVectorQuery(name(), queryVector, k, numCands, filter, searchStrategy, hnswEarlyTermination);
             }
             if (rescore) {
-                knnQuery = RescoreKnnVectorQuery.fromInnerQuery(
-                    name(),
-                    queryVector,
-                    k,
-                    adjustedK,
-                    knnQuery
-                );
+                knnQuery = RescoreKnnVectorQuery.fromInnerQuery(name(), queryVector, k, adjustedK, knnQuery);
             }
             if (similarityThreshold != null) {
                 knnQuery = new VectorSimilarityQuery(
