@@ -705,13 +705,7 @@ public class KnnSearcher {
             float visitRatio = (float) (searchParameters.visitPercentage() / 100);
             knnQuery = new IVFKnnByteVectorQuery(VECTOR_FIELD, vector, overSampledTopK, efSearch, filterQuery, visitRatio, doPrecondition);
             if (searchParameters.overSamplingFactor() > 1f) {
-                knnQuery = RescoreKnnVectorQuery.fromInnerQuery(
-                    VECTOR_FIELD,
-                    vector,
-                    searchParameters.topK(),
-                    overSampledTopK,
-                    knnQuery
-                );
+                knnQuery = RescoreKnnVectorQuery.fromInnerQuery(VECTOR_FIELD, vector, searchParameters.topK(), overSampledTopK, knnQuery);
             }
         } else {
             if (searchParameters.overSamplingFactor() > 1f) {
