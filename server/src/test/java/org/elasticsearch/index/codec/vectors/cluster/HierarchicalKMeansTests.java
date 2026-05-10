@@ -23,10 +23,10 @@ import static org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans.N
 
 public class HierarchicalKMeansTests extends ESTestCase {
 
-    public void testHKmeans() throws IOException {
-        int nClusters = random().nextInt(1, 10);
-        int nVectors = random().nextInt(nClusters, nClusters * 200);
+    public void testHierarchicalKMeansWithBalancing() throws IOException {
+        int nVectors = random().nextInt(100, 10000);
         int dims = random().nextInt(2, 20);
+        int nClusters = random().nextInt(2, 50);
         int sampleSize = random().nextInt(Math.min(nVectors, 100), nVectors + 1);
         int maxIterations = random().nextInt(1, 100);
         int clustersPerNeighborhood = random().nextInt(2, 512);
@@ -35,9 +35,16 @@ public class HierarchicalKMeansTests extends ESTestCase {
         KMeansFloatVectorValues vectors = generateData(nVectors, dims, nClusters);
 
         int targetSize = (int) ((float) nVectors / (float) nClusters);
-        HierarchicalKMeans hkmeans = HierarchicalKMeans.ofSerial(dims, maxIterations, sampleSize, clustersPerNeighborhood, soarLambda);
+        HierarchicalKMeans<float[]> hkmeans = HierarchicalKMeans.ofSerial(
+            CentroidOps.FLOAT,
+            dims,
+            maxIterations,
+            sampleSize,
+            clustersPerNeighborhood,
+            soarLambda
+        );
 
-        KMeansResult result = hkmeans.cluster(vectors, targetSize);
+        KMeansResult<float[]> result = hkmeans.cluster(vectors, targetSize);
 
         int[] assignmentsTemp = result.assignments();
         int[] serialClusterSizes = new int[result.centroids().length];
@@ -71,6 +78,7 @@ public class HierarchicalKMeansTests extends ESTestCase {
         try (ExecutorService service = Executors.newFixedThreadPool(numWorker)) {
             TaskExecutor executor = new TaskExecutor(service);
             hkmeans = HierarchicalKMeans.ofConcurrent(
+                CentroidOps.FLOAT,
                 dims,
                 executor,
                 numWorker,
@@ -79,7 +87,7 @@ public class HierarchicalKMeansTests extends ESTestCase {
                 clustersPerNeighborhood,
                 soarLambda
             );
-            KMeansResult resultConcurrency = hkmeans.cluster(vectors, targetSize);
+            KMeansResult<float[]> resultConcurrency = hkmeans.cluster(vectors, targetSize);
 
             assignmentsTemp = resultConcurrency.assignments();
             int[] concurrentClusterSizes = new int[resultConcurrency.centroids().length];
@@ -101,7 +109,7 @@ public class HierarchicalKMeansTests extends ESTestCase {
         return (float) Math.sqrt(varSize);
     }
 
-    static float kMeansMeanInertia(KMeansFloatVectorValues vectors, KMeansResult kMeansIntermediate) throws IOException {
+    static float kMeansMeanInertia(KMeansFloatVectorValues vectors, KMeansResult<float[]> kMeansIntermediate) throws IOException {
         int[] assignments = kMeansIntermediate.assignments();
         float[][] centroids = kMeansIntermediate.centroids();
 
@@ -153,7 +161,8 @@ public class HierarchicalKMeansTests extends ESTestCase {
         }
         KMeansFloatVectorValues vectors = KMeansFloatVectorValues.build(vectorList, null, dims);
 
-        HierarchicalKMeans hkmeans = HierarchicalKMeans.ofSerial(
+        HierarchicalKMeans<float[]> hkmeans = HierarchicalKMeans.ofSerial(
+            CentroidOps.FLOAT,
             dims,
             random().nextInt(1, 100),
             random().nextInt(Math.min(nVectors, 100), nVectors + 1),
@@ -161,7 +170,7 @@ public class HierarchicalKMeansTests extends ESTestCase {
             random().nextFloat(0.5f, 1.5f)
         );
 
-        KMeansResult result = hkmeans.cluster(vectors, targetSize);
+        KMeansResult<float[]> result = hkmeans.cluster(vectors, targetSize);
 
         float[][] centroids = result.centroids();
         int[] assignments = result.assignments();

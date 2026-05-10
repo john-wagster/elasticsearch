@@ -132,13 +132,13 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         final int dims = fieldInfo.getVectorDimension();
         final int[] scratch = new int[dims];
         final OptimizedScalarQuantizer.QuantizationResult queryParams = switch (queryTarget) {
-            case QueryTarget.ByteQuery byteQuery -> scalarQuantizer.scalarQuantize(
-                byteQuery.vector(),
-                new float[dims],
-                scratch,
-                (byte) 7,
-                fieldEntry.globalCentroid()
-            );
+            case QueryTarget.ByteQuery byteQuery -> {
+                byte[] globalCentroidBytes = new byte[dims];
+                for (int i = 0; i < dims; i++) {
+                    globalCentroidBytes[i] = (byte) Math.clamp(Math.round(fieldEntry.globalCentroid()[i]), -128, 127);
+                }
+                yield scalarQuantizer.scalarQuantize(byteQuery.vector(), new float[dims], scratch, (byte) 7, globalCentroidBytes);
+            }
             case QueryTarget.FloatQuery floatQuery -> scalarQuantizer.scalarQuantize(
                 floatQuery.vector(),
                 new float[dims],
@@ -458,7 +458,9 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         int bulkSize
     ) throws IOException {
         // build the three queues we are going to use
-        final long rawParentSize = (long) fieldInfo.getVectorDimension() * Float.BYTES;
+        final boolean byteBacked = fieldInfo.getVectorEncoding() == VectorEncoding.BYTE
+            && fieldInfo.getVectorSimilarityFunction() != VectorSimilarityFunction.COSINE;
+        final long rawParentSize = byteBacked ? (long) fieldInfo.getVectorDimension() : (long) fieldInfo.getVectorDimension() * Float.BYTES;
         final long centroidQuantizeSize = fieldInfo.getVectorDimension() + 3 * Float.BYTES + Integer.BYTES;
         final NeighborQueue parentsQueue = new NeighborQueue(numParents, true);
         final int maxChildrenSize = centroids.readVInt();
@@ -718,40 +720,15 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         final QueryQuantizer queryQuantizer;
         if (numParents > 0) {
             int longestPostingList = centroidSlice.readVInt();
-            IndexInput parentsSlice = centroidSlice.slice(
-                "parents-slice",
-                centroidSlice.getFilePointer(),
-                (long) numParents * fieldInfo.getVectorDimension() * Float.BYTES
-            );
-            queryQuantizer = switch (queryTarget) {
-                case QueryTarget.FloatQuery fq -> new QueryQuantizer(
-                    quantEncoding,
-                    fieldInfo,
-                    fq.vector(),
-                    parentsSlice,
-                    entry.globalCentroid()
-                );
-                case QueryTarget.ByteQuery bq -> new QueryQuantizer(
-                    quantEncoding,
-                    fieldInfo,
-                    null,
-                    bq.vector(),
-                    parentsSlice,
-                    entry.globalCentroid()
-                );
-            };
+            boolean byteBacked = fieldInfo.getVectorEncoding() == VectorEncoding.BYTE
+                && fieldInfo.getVectorSimilarityFunction() != VectorSimilarityFunction.COSINE;
+            long parentCentroidBytes = byteBacked
+                ? (long) numParents * fieldInfo.getVectorDimension()
+                : (long) numParents * fieldInfo.getVectorDimension() * Float.BYTES;
+            IndexInput parentsSlice = centroidSlice.slice("parents-slice", centroidSlice.getFilePointer(), parentCentroidBytes);
+            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, queryTarget, parentsSlice, entry.globalCentroid());
         } else {
-            queryQuantizer = switch (queryTarget) {
-                case QueryTarget.FloatQuery fq -> new QueryQuantizer(quantEncoding, fieldInfo, fq.vector(), null, entry.globalCentroid());
-                case QueryTarget.ByteQuery bq -> new QueryQuantizer(
-                    quantEncoding,
-                    fieldInfo,
-                    null,
-                    bq.vector(),
-                    null,
-                    entry.globalCentroid()
-                );
-            };
+            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, queryTarget, null, entry.globalCentroid());
         }
         if (entry.numSlices == 0) {
             assert entry.numCentroids() == 1;
@@ -786,14 +763,16 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
     private static class QueryQuantizer {
         private final LinkedHashMap<Integer, QueryQuantizerResult> cache;
         private final ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding;
-        private final float[] target;
-        private final byte[] byteTarget;
+        private final QueryTarget queryTarget;
         private final float[] scratch;
         private final int[] quantizationScratch;
         private final OptimizedScalarQuantizer quantizer;
         private final IndexInput parentsSlice;
         private final float[] globalCentroid;
+        private final byte[] globalCentroidBytes;
         private final float[] centroidScratch;
+        private final byte[] byteCentroidScratch;
+        private final boolean byteBacked;
         private int currentCentroidOrdinal = -2;
         private int nextCentroidOrdinal = -1;
         private byte[] evictedQuantizedQuery = null;
@@ -802,30 +781,29 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         QueryQuantizer(
             ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding,
             FieldInfo fieldInfo,
-            float[] target,
-            IndexInput parentsSlice,
-            float[] globalCentroid
-        ) {
-            this(quantEncoding, fieldInfo, target, null, parentsSlice, globalCentroid);
-        }
-
-        QueryQuantizer(
-            ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding,
-            FieldInfo fieldInfo,
-            float[] target,
-            byte[] byteTarget,
+            QueryTarget queryTarget,
             IndexInput parentsSlice,
             float[] globalCentroid
         ) {
             this.quantEncoding = quantEncoding;
-            this.target = target;
-            this.byteTarget = byteTarget;
+            this.queryTarget = queryTarget;
+            this.byteBacked = fieldInfo.getVectorEncoding() == VectorEncoding.BYTE
+                && fieldInfo.getVectorSimilarityFunction() != VectorSimilarityFunction.COSINE;
             this.scratch = new float[fieldInfo.getVectorDimension()];
             this.centroidScratch = new float[fieldInfo.getVectorDimension()];
+            this.byteCentroidScratch = byteBacked ? new byte[fieldInfo.getVectorDimension()] : null;
             this.quantizationScratch = new int[quantEncoding.discretizedDimensions(fieldInfo.getVectorDimension())];
             this.quantizer = new OptimizedScalarQuantizer(IVFVectorsWriter.effectiveSimilarity(fieldInfo), DEFAULT_LAMBDA, 1);
             this.parentsSlice = parentsSlice;
             this.globalCentroid = globalCentroid;
+            if (byteBacked) {
+                this.globalCentroidBytes = new byte[globalCentroid.length];
+                for (int i = 0; i < globalCentroid.length; i++) {
+                    globalCentroidBytes[i] = (byte) Math.clamp(Math.round(globalCentroid[i]), -128, 127);
+                }
+            } else {
+                this.globalCentroidBytes = null;
+            }
             this.cache = new LinkedHashMap<>(QUERY_CACHE_SIZE, 0.75f, true) {
                 @Override
                 protected boolean removeEldestEntry(Map.Entry<Integer, QueryQuantizerResult> eldest) {
@@ -858,31 +836,40 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 final float[] queryCentroid;
                 if (parentsSlice != null) {
                     assert nextCentroidOrdinal >= 0;
-                    parentsSlice.seek((long) nextCentroidOrdinal * centroidScratch.length * Float.BYTES);
-                    parentsSlice.readFloats(centroidScratch, 0, centroidScratch.length);
+                    if (byteBacked) {
+                        parentsSlice.seek((long) nextCentroidOrdinal * centroidScratch.length);
+                        parentsSlice.readBytes(byteCentroidScratch, 0, centroidScratch.length);
+                        for (int i = 0; i < centroidScratch.length; i++) {
+                            centroidScratch[i] = (float) byteCentroidScratch[i];
+                        }
+                    } else {
+                        parentsSlice.seek((long) nextCentroidOrdinal * centroidScratch.length * Float.BYTES);
+                        parentsSlice.readFloats(centroidScratch, 0, centroidScratch.length);
+                    }
                     queryCentroid = centroidScratch;
                 } else {
                     assert nextCentroidOrdinal == NO_ORDINAL;
                     queryCentroid = globalCentroid;
                 }
-                OptimizedScalarQuantizer.QuantizationResult queryCorrections;
-                if (byteTarget != null) {
-                    queryCorrections = quantizer.scalarQuantize(
-                        byteTarget,
+                OptimizedScalarQuantizer.QuantizationResult queryCorrections = switch (queryTarget) {
+                    case QueryTarget.ByteQuery bq -> {
+                        assert byteBacked : "byte queries should only be used for non-COSINE byte fields";
+                        final byte[] byteCentroid;
+                        if (parentsSlice != null) {
+                            byteCentroid = byteCentroidScratch;
+                        } else {
+                            byteCentroid = globalCentroidBytes;
+                        }
+                        yield quantizer.scalarQuantize(bq.vector(), scratch, quantizationScratch, quantEncoding.queryBits(), byteCentroid);
+                    }
+                    case QueryTarget.FloatQuery fq -> quantizer.scalarQuantize(
+                        fq.vector(),
                         scratch,
                         quantizationScratch,
                         quantEncoding.queryBits(),
                         queryCentroid
                     );
-                } else {
-                    queryCorrections = quantizer.scalarQuantize(
-                        target,
-                        scratch,
-                        quantizationScratch,
-                        quantEncoding.queryBits(),
-                        queryCentroid
-                    );
-                }
+                };
                 quantEncoding.packQuery(quantizationScratch, quantizedQuery);
                 currentCentroidOrdinal = nextCentroidOrdinal;
                 result = new QueryQuantizerResult(queryCorrections, quantizedQuery);

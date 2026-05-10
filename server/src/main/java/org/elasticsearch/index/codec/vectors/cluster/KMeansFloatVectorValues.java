@@ -98,19 +98,6 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
     }
 
     /**
-     * Builds an instance from off-heap byte vectors. Vectors are expected to be written as
-     * raw bytes one after the other (1 byte per dimension). Docs are expected to be written
-     * as little endian ints one after the other.
-     * <p>
-     * Each byte value [-128, 127] is lazily converted to float on {@link #vectorValue(int)}.
-     * When {@code normalize} is true, the converted float vector is L2-normalized.
-     */
-    public static KMeansFloatVectorValues buildFromBytes(IndexInput vectors, IndexInput docs, int numVectors, int dims, boolean normalize)
-        throws IOException {
-        return buildFromBytes(vectors, docs, numVectors, dims, normalize, null);
-    }
-
-    /**
      * Builds an instance from off-heap byte vectors with optional preconditioning.
      * When a {@code preconditioner} is provided, the rotation is applied lazily during
      * {@link #vectorValue(int)} after the byte-to-float conversion.

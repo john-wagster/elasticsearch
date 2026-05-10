@@ -27,6 +27,8 @@ import org.apache.lucene.util.packed.PackedInts;
 import org.apache.lucene.util.packed.PackedLongValues;
 import org.elasticsearch.core.SuppressForbidden;
 import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
+import org.elasticsearch.index.codec.vectors.cluster.CentroidOps;
+import org.elasticsearch.index.codec.vectors.cluster.ClusteringByteVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansResult;
@@ -41,6 +43,7 @@ import org.elasticsearch.index.codec.vectors.diskbbq.IntToBooleanFunction;
 import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantizedVectorValues;
 import org.elasticsearch.index.codec.vectors.diskbbq.VectorPreconditioner;
+import org.elasticsearch.index.codec.vectors.diskbbq.WriterVectorValues;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.simdvec.ES940OSQVectorsScorer;
@@ -248,13 +251,13 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
     public CentroidOffsetAndLength buildAndWritePostingsLists(
         FieldInfo fieldInfo,
         CentroidSupplier centroidSupplier,
-        FloatVectorValues floatVectorValues,
+        WriterVectorValues vectorValues,
         IndexOutput postingsOutput,
         long fileOffset,
         int[] assignments,
         int[] overspillAssignments
     ) throws IOException {
-        KMeansResult centroidClusters = centroidSupplier.secondLevelClusters();
+        KMeansResult<float[]> centroidClusters = centroidSupplier.secondLevelClusters();
         int[] centroidVectorCount = new int[centroidSupplier.size()];
         for (int i = 0; i < assignments.length; i++) {
             centroidVectorCount[assignments[i]]++;
@@ -289,7 +292,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
         final PackedLongValues.Builder lengths = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
         DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.fromBitSize(quantEncoding.bits(), BULK_SIZE, postingsOutput, true, true);
         OnHeapQuantizedVectors onHeapQuantizedVectors = new OnHeapQuantizedVectors(
-            floatVectorValues,
+            vectorValues,
             fieldInfo.getVectorSimilarityFunction(),
             quantEncoding,
             fieldInfo.getVectorDimension(),
@@ -309,7 +312,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
             // write docIds
             postingsOutput.writeVInt(size);
             for (int j = 0; j < size; j++) {
-                docIds[j] = floatVectorValues.ordToDoc(cluster[j]);
+                docIds[j] = vectorValues.ordToDoc(cluster[j]);
                 clusterOrds[j] = j;
             }
             // sort cluster.buffer by docIds values, this way cluster ordinals are sorted by docIds
@@ -340,7 +343,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
     public CentroidOffsetAndLength buildAndWritePostingsLists(
         FieldInfo fieldInfo,
         CentroidSupplier centroidSupplier,
-        FloatVectorValues floatVectorValues,
+        WriterVectorValues vectorValues,
         IndexOutput postingsOutput,
         long fileOffset,
         MergeState mergeState,
@@ -349,7 +352,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
     ) throws IOException {
         // first, quantize all the vectors into a temporary file
         var vectorSimilarityFunction = fieldInfo.getVectorSimilarityFunction();
-        KMeansResult centroidClusters = centroidSupplier.secondLevelClusters();
+        KMeansResult<float[]> centroidClusters = centroidSupplier.secondLevelClusters();
         String quantizedVectorsTempName = null;
         try (
             IndexOutput quantizedVectorsTemp = mergeState.segmentInfo.dir.createTempOutput(
@@ -367,7 +370,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
                 int c = assignments[i];
                 float[] centroid = centroidSupplier.centroid(c);
                 float[] parentCentroid = centroidClusters.getCentroid(c);
-                float[] vector = floatVectorValues.vectorValue(i);
+                float[] vector = vectorValues.vectorValue(i);
                 boolean overspill = overspillAssignments.length > i && overspillAssignments[i] != NO_SOAR_ASSIGNMENT;
                 OptimizedScalarQuantizer.QuantizationResult result = quantizer.scalarQuantize(
                     vector,
@@ -478,7 +481,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
                 int size = cluster.length;
                 postingsOutput.writeVInt(size);
                 for (int j = 0; j < size; j++) {
-                    docIds[j] = floatVectorValues.ordToDoc(cluster[j]);
+                    docIds[j] = vectorValues.ordToDoc(cluster[j]);
                     clusterOrds[j] = j;
                 }
                 // sort cluster.buffer by docIds values, this way cluster ordinals are sorted by docIds
@@ -552,7 +555,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
             KMeansResult.singleCluster(globalCentroid, numCentroids)
         );
         if (centroidSupplier.size() > centroidsPerParentCluster * centroidsPerParentCluster) {
-            KMeansResult centroidClusters = buildSecondLevelClusters(fieldInfo, centroidSupplier, true);
+            KMeansResult<float[]> centroidClusters = buildSecondLevelClusters(fieldInfo, centroidSupplier, true);
             return new OffHeapCentroidSupplier(centroidsInput, numCentroids, fieldInfo, centroidClusters);
         }
         return centroidSupplier;
@@ -566,7 +569,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
             info.getVectorDimension()
         );
         if (centroidSupplier.size() > centroidsPerParentCluster * centroidsPerParentCluster) {
-            KMeansResult centroidClusters = buildSecondLevelClusters(info, centroidSupplier, false);
+            KMeansResult<float[]> centroidClusters = buildSecondLevelClusters(info, centroidSupplier, false);
             return CentroidSupplier.fromArray(centroids, centroidClusters, info.getVectorDimension());
         }
         return centroidSupplier;
@@ -625,7 +628,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
         CentroidOffsetAndLength centroidOffsetAndLength,
         IndexOutput centroidOutput
     ) throws IOException {
-        if (centroidSupplier.secondLevelClusters().centroidsSupplier().size() > 1) {
+        if (centroidSupplier.secondLevelClusters().centroids().length > 1) {
             final CentroidGroups centroidGroups = buildCentroidGroups(centroidSupplier.secondLevelClusters());
             {
                 // write vector ord -> centroid lookup table. We need to remap current centroid ordinals
@@ -680,7 +683,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
             centroidOutput.writeBytes(buffer.array(), buffer.array().length);
         }
         QuantizedCentroids parentQuantizeCentroid = new QuantizedCentroids(
-            CentroidSupplier.fromArray(centroidGroups.centroids, KMeansResult.EMPTY, fieldInfo.getVectorDimension()),
+            CentroidSupplier.fromArray(centroidGroups.centroids(), KMeansResult.emptyFloat(), fieldInfo.getVectorDimension()),
             fieldInfo.getVectorDimension(),
             osq,
             globalCentroid
@@ -739,14 +742,15 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
         }
     }
 
-    private KMeansResult buildSecondLevelClusters(FieldInfo fieldInfo, CentroidSupplier centroidSupplier, boolean isMerge)
+    private KMeansResult<float[]> buildSecondLevelClusters(FieldInfo fieldInfo, CentroidSupplier centroidSupplier, boolean isMerge)
         throws IOException {
         final KMeansFloatVectorValues floatVectorValues = centroidSupplier.asKmeansFloatVectorValues();
         // we use the HierarchicalKMeans to partition the space of all vectors across merging segments
         // this are small numbers so we run it wih all the centroids.
-        HierarchicalKMeans hierarchicalKMeans;
+        HierarchicalKMeans<float[]> hierarchicalKMeans;
         if (isMerge && mergeExec != null) {
             hierarchicalKMeans = HierarchicalKMeans.ofConcurrent(
+                CentroidOps.FLOAT,
                 fieldInfo.getVectorDimension(),
                 mergeExec,
                 numMergeWorkers,
@@ -757,6 +761,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
             );
         } else {
             hierarchicalKMeans = HierarchicalKMeans.ofSerial(
+                CentroidOps.FLOAT,
                 fieldInfo.getVectorDimension(),
                 HierarchicalKMeans.MAX_ITERATIONS_DEFAULT,
                 HierarchicalKMeans.SAMPLES_PER_CLUSTER_DEFAULT,
@@ -767,14 +772,14 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
         return hierarchicalKMeans.cluster(floatVectorValues, centroidsPerParentCluster);
     }
 
-    private CentroidGroups buildCentroidGroups(KMeansResult kMeansResult) {
+    private CentroidGroups buildCentroidGroups(KMeansResult<float[]> kMeansResult) {
         final int[] centroidVectorCount = new int[kMeansResult.centroids().length];
         for (int i = 0; i < kMeansResult.assignments().length; i++) {
             centroidVectorCount[kMeansResult.assignments()[i]]++;
         }
         final int[][] vectorsPerCentroid = new int[kMeansResult.centroids().length][];
         int maxVectorsPerCentroidLength = 0;
-        for (int i = 0; i < kMeansResult.centroidsSupplier().size(); i++) {
+        for (int i = 0; i < kMeansResult.centroids().length; i++) {
             vectorsPerCentroid[i] = new int[centroidVectorCount[i]];
             maxVectorsPerCentroidLength = Math.max(maxVectorsPerCentroidLength, centroidVectorCount[i]);
         }
@@ -787,16 +792,24 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
     }
 
     @Override
-    public CentroidAssignments calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues, MergeState mergeState)
-        throws IOException {
+    public CentroidAssignments<float[]> calculateCentroids(
+        FieldInfo fieldInfo,
+        KMeansFloatVectorValues floatVectorValues,
+        MergeState mergeState
+    ) throws IOException {
         // TODO: consider hinting / bootstrapping hierarchical kmeans with the prior segments centroids
         // TODO: for flush we are doing this over the vectors and here centroids which seems duplicative
         // preliminary tests suggest recall is good using only centroids but need to do further evaluation
-        HierarchicalKMeans hierarchicalKMeans;
+        HierarchicalKMeans<float[]> hierarchicalKMeans;
         if (mergeExec != null) {
-            hierarchicalKMeans = HierarchicalKMeans.ofConcurrent(floatVectorValues.dimension(), mergeExec, numMergeWorkers);
+            hierarchicalKMeans = HierarchicalKMeans.ofConcurrent(
+                CentroidOps.FLOAT,
+                floatVectorValues.dimension(),
+                mergeExec,
+                numMergeWorkers
+            );
         } else {
-            hierarchicalKMeans = HierarchicalKMeans.ofSerial(floatVectorValues.dimension());
+            hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         }
         return calculateCentroids(hierarchicalKMeans, floatVectorValues, fieldInfo);
     }
@@ -811,24 +824,45 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
      * @throws IOException if an I/O error occurs
      */
     @Override
-    public CentroidAssignments calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues) throws IOException {
-        HierarchicalKMeans hierarchicalKMeans = HierarchicalKMeans.ofSerial(floatVectorValues.dimension());
+    public CentroidAssignments<float[]> calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues)
+        throws IOException {
+        HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         return calculateCentroids(hierarchicalKMeans, floatVectorValues, fieldInfo);
     }
 
-    private CentroidAssignments calculateCentroids(
-        HierarchicalKMeans hierarchicalKMeans,
+    private CentroidAssignments<float[]> calculateCentroids(
+        HierarchicalKMeans<float[]> hierarchicalKMeans,
         KMeansFloatVectorValues floatVectorValues,
         FieldInfo fieldInfo
     ) throws IOException {
-        KMeansResult kMeansResult = hierarchicalKMeans.cluster(floatVectorValues, vectorPerCluster);
+        KMeansResult<float[]> kMeansResult = hierarchicalKMeans.cluster(floatVectorValues, vectorPerCluster);
         float[][] centroids = kMeansResult.centroids();
         if (logger.isDebugEnabled()) {
             logger.debug("final centroid count: {}", centroids.length);
         }
         int[] assignments = kMeansResult.assignments();
         int[] soarAssignments = kMeansResult.soarAssignments();
-        return new CentroidAssignments(fieldInfo.getVectorDimension(), centroids, assignments, soarAssignments);
+        return new CentroidAssignments<>(fieldInfo.getVectorDimension(), centroids, assignments, soarAssignments);
+    }
+
+    @Override
+    public CentroidAssignments<byte[]> calculateByteCentroids(FieldInfo fieldInfo, ClusteringByteVectorValues byteVectorValues)
+        throws IOException {
+        throw new UnsupportedOperationException("byte vector clustering not supported in ES940 format");
+    }
+
+    @Override
+    public CentroidAssignments<byte[]> calculateByteCentroids(
+        FieldInfo fieldInfo,
+        ClusteringByteVectorValues byteVectorValues,
+        MergeState mergeState
+    ) throws IOException {
+        throw new UnsupportedOperationException("byte vector clustering not supported in ES940 format");
+    }
+
+    @Override
+    public CentroidSupplier createCentroidSupplier(FieldInfo info, byte[][] centroids, float[] globalCentroid) throws IOException {
+        throw new UnsupportedOperationException("byte centroid supplier not supported in ES940 format");
     }
 
     static void writeQuantizedValue(IndexOutput indexOutput, byte[] binaryValue, OptimizedScalarQuantizer.QuantizationResult corrections)
@@ -845,10 +879,10 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
         private final int numCentroids;
         private final int dimension;
         private final float[] scratch;
-        private final KMeansResult clusters;
+        private final KMeansResult<float[]> clusters;
         private int currOrd = -1;
 
-        OffHeapCentroidSupplier(IndexInput centroidsInput, int numCentroids, FieldInfo info, KMeansResult clusters) {
+        OffHeapCentroidSupplier(IndexInput centroidsInput, int numCentroids, FieldInfo info, KMeansResult<float[]> clusters) {
             this.centroidsInput = centroidsInput;
             this.numCentroids = numCentroids;
             this.dimension = info.getVectorDimension();
@@ -873,7 +907,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
         }
 
         @Override
-        public KMeansResult secondLevelClusters() {
+        public KMeansResult<float[]> secondLevelClusters() {
             return clusters;
         }
 
@@ -938,7 +972,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
     }
 
     static class OnHeapQuantizedVectors implements QuantizedVectorValues {
-        private final FloatVectorValues vectorValues;
+        private final WriterVectorValues vectorValues;
         private final OptimizedScalarQuantizer quantizer;
         private final byte[] quantizedVector;
         private final int[] quantizedVectorScratch;
@@ -952,7 +986,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
         private int count;
 
         OnHeapQuantizedVectors(
-            FloatVectorValues vectorValues,
+            WriterVectorValues vectorValues,
             VectorSimilarityFunction similarityFunction,
             ES940DiskBBQVectorsFormat.QuantEncoding encoding,
             int dimension,

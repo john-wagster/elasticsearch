@@ -12,8 +12,6 @@ package org.elasticsearch.index.codec.vectors.cluster;
 import org.apache.lucene.search.TaskExecutor;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.hnsw.IntToIntFunction;
-import org.elasticsearch.simdvec.ESVectorUtil;
-import org.elasticsearch.simdvec.MathUtils;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -25,57 +23,64 @@ import java.util.concurrent.Callable;
  * k-means implementation specific to the needs of the {@link HierarchicalKMeans} algorithm that deals specifically
  * with finalizing nearby pre-established clusters and generate
  * <a href="https://research.google/blog/soar-new-algorithms-for-even-faster-vector-search-with-scann/">SOAR</a> assignments
+ *
+ * @param <V> the array type for vectors and centroids ({@code float[]} or {@code byte[]})
  */
-abstract class KMeansLocal {
+abstract class KMeansLocal<V> {
 
-    KMeansLocal() {}
+    protected final CentroidOps<V> ops;
+
+    KMeansLocal(CentroidOps<V> ops) {
+        this.ops = ops;
+    }
 
     /** Number of workers to use for parallelism **/
     protected abstract int numWorkers();
 
     /** assign to each vector the soar assignment **/
     protected abstract void assignSpilled(
-        ClusteringFloatVectorValues vectors,
-        KMeansIntermediate kmeansIntermediate,
+        ClusteringVectorValues<V> vectors,
+        KMeansIntermediate<V> kmeansIntermediate,
         NeighborHood[] neighborhoods,
         float soarLambda
     ) throws IOException;
 
     /** compute the neighborhoods for the given centroids and clustersPerNeighborhood */
-    protected abstract NeighborHood[] computeNeighborhoods(float[][] centroids, int clustersPerNeighborhood) throws IOException;
+    protected abstract NeighborHood[] computeNeighborhoods(V[] centroids, int clustersPerNeighborhood) throws IOException;
 
     /**
-     * uses a Reservoir Sampling approach to picking the initial centroids which are subsequently expected
-     * to be used by a clustering algorithm
+     * Uses a Reservoir Sampling approach to picking the initial centroids which are subsequently expected
+     * to be used by a clustering algorithm.
      *
-     * @param vectors used to pick an initial set of random centroids
+     * @param vectors the vector values to sample from
      * @param centroidCount the total number of centroids to pick
-     * @return randomly selected centroids that are the min of centroidCount and sampleSize
-     * @throws IOException is thrown if vectors is inaccessible
+     * @param ops the centroid operations for creating/copying centroids
+     * @return randomly selected centroids
+     * @throws IOException if vectors are inaccessible
      */
-    static float[][] pickInitialCentroids(ClusteringFloatVectorValues vectors, int centroidCount) throws IOException {
+    static <V> V[] pickInitialCentroids(ClusteringVectorValues<V> vectors, int centroidCount, CentroidOps<V> ops) throws IOException {
         Random random = new Random(42L);
         int centroidsSize = Math.min(vectors.size(), centroidCount);
-        float[][] centroids = new float[centroidsSize][vectors.dimension()];
+        V[] centroids = ops.newCentroidArray(centroidsSize, vectors.dimension());
         for (int i = 0; i < vectors.size(); i++) {
-            float[] vector;
             if (i < centroidCount) {
-                vector = vectors.vectorValue(i);
-                System.arraycopy(vector, 0, centroids[i], 0, vector.length);
+                V vector = vectors.vectorValue(i);
+                ops.initCentroid(centroids[i], vector, vectors.dimension());
             } else if (random.nextDouble() < centroidCount * (1.0 / i)) {
                 int c = random.nextInt(centroidCount);
-                vector = vectors.vectorValue(i);
-                System.arraycopy(vector, 0, centroids[c], 0, vector.length);
+                V vector = vectors.vectorValue(i);
+                ops.initCentroid(centroids[c], vector, vectors.dimension());
             }
         }
         return centroids;
     }
 
     /** Assign vectors from {@code startOrd} to {@code endOrd} to the closest centroid. */
-    protected static boolean stepLloydSlice(
-        ClusteringFloatVectorValues vectors,
+    protected static <V> boolean stepLloydSlice(
+        ClusteringVectorValues<V> vectors,
+        CentroidOps<V> ops,
         IntToIntFunction ordTranslator,
-        float[][] centroids,
+        V[] centroids,
         FixedBitSet centroidChanged,
         int[] assignments,
         NeighborHood[] neighborhoods,
@@ -84,7 +89,9 @@ abstract class KMeansLocal {
     ) throws IOException {
         centroidChanged.clear();
         if (neighborhoods != null) {
-            return vectors.bestCentroidsFromNeighbours(
+            return CentroidAssignment.bestCentroidsFromNeighbours(
+                vectors,
+                ops,
                 startOrd,
                 endOrd,
                 centroids,
@@ -94,16 +101,17 @@ abstract class KMeansLocal {
                 assignments
             );
         } else {
-            return vectors.bestCentroids(startOrd, endOrd, centroids, ordTranslator, centroidChanged, assignments);
+            return CentroidAssignment.bestCentroids(vectors, ops, startOrd, endOrd, centroids, ordTranslator, centroidChanged, assignments);
         }
     }
 
-    protected static boolean stepLloydSliceConcurrent(
+    protected static <V> boolean stepLloydSliceConcurrent(
         TaskExecutor executor,
         int numWorkers,
-        ClusteringFloatVectorValues vectors,
+        ClusteringVectorValues<V> vectors,
+        CentroidOps<V> ops,
         IntToIntFunction ordTranslator,
-        float[][] centroids,
+        V[] centroids,
         FixedBitSet[] centroidChangedSlices,
         int[] assignments,
         NeighborHood[] neighborHoods
@@ -116,7 +124,17 @@ abstract class KMeansLocal {
             final int end = i == numWorkers - 1 ? vectors.size() : (i + 1) * len;
             final FixedBitSet centroidChangedSlice = centroidChangedSlices[i];
             runners.add(
-                () -> stepLloydSlice(vectors.copy(), ordTranslator, centroids, centroidChangedSlice, assignments, neighborHoods, start, end)
+                () -> stepLloydSlice(
+                    vectors.copy(),
+                    ops,
+                    ordTranslator,
+                    centroids,
+                    centroidChangedSlice,
+                    assignments,
+                    neighborHoods,
+                    start,
+                    end
+                )
             );
         }
         final List<Boolean> hasChanges = executor.invokeAll(runners);
@@ -124,9 +142,10 @@ abstract class KMeansLocal {
     }
 
     /** Assign vectors from {@code startOrd} to {@code endOrd} to the SOAR centroid. */
-    protected static void assignSpilledSlice(
-        ClusteringFloatVectorValues vectors,
-        KMeansIntermediate kmeansIntermediate,
+    protected static <V> void assignSpilledSlice(
+        ClusteringVectorValues<V> vectors,
+        CentroidOps<V> ops,
+        KMeansIntermediate<V> kmeansIntermediate,
         NeighborHood[] neighborhoods,
         float soarLambda,
         int startOrd,
@@ -138,15 +157,26 @@ abstract class KMeansLocal {
         int[] spilledAssignments = kmeansIntermediate.soarAssignments();
         assert spilledAssignments != null;
         assert spilledAssignments.length == vectors.size();
-        float[][] centroids = kmeansIntermediate.centroids();
-        vectors.assignSpilled(startOrd, endOrd, centroids, neighborhoods, soarLambda, assignments, spilledAssignments);
+        V[] centroids = kmeansIntermediate.centroids();
+        CentroidAssignment.assignSpilled(
+            vectors,
+            ops,
+            startOrd,
+            endOrd,
+            centroids,
+            neighborhoods,
+            soarLambda,
+            assignments,
+            spilledAssignments
+        );
     }
 
-    protected static void assignSpilledConcurrent(
+    protected static <V> void assignSpilledConcurrent(
         TaskExecutor executor,
         int numWorkers,
-        ClusteringFloatVectorValues vectors,
-        KMeansIntermediate kmeansIntermediate,
+        ClusteringVectorValues<V> vectors,
+        CentroidOps<V> ops,
+        KMeansIntermediate<V> kmeansIntermediate,
         NeighborHood[] neighborhoods,
         float soarLambda
     ) throws IOException {
@@ -156,7 +186,7 @@ abstract class KMeansLocal {
             final int start = i * len;
             final int end = i == numWorkers - 1 ? vectors.size() : (i + 1) * len;
             runners.add(() -> {
-                assignSpilledSlice(vectors.copy(), kmeansIntermediate, neighborhoods, soarLambda, start, end);
+                assignSpilledSlice(vectors.copy(), ops, kmeansIntermediate, neighborhoods, soarLambda, start, end);
                 return null;
             });
         }
@@ -165,36 +195,18 @@ abstract class KMeansLocal {
 
     /**
      * Compute a clustering that is not neighbor aware.
-     * Different implementations of this abstract class may use different algorithm for clustering.
-     *
-     * @param vectors the vectors to cluster
-     * @param kMeansIntermediate the output object to populate which minimally includes centroids,
-     *                     but may include assignments and soar assignments as well; care should be taken in
-     *                     passing in a valid output object with a centroids array that is the size of centroids expected
-     * @throws IOException is thrown if vectors is inaccessible
      */
-    final void cluster(ClusteringFloatVectorValues vectors, KMeansIntermediate kMeansIntermediate) throws IOException {
+    final void cluster(ClusteringVectorValues<V> vectors, KMeansIntermediate<V> kMeansIntermediate) throws IOException {
         doCluster(vectors, kMeansIntermediate, -1, -1);
     }
 
     /**
      * Compute a clustering that considers prior clustered neighborhoods when adjusting centroids.
-     * Different implementations of this abstract class may use different algorithm for clustering.
-     * This also is used to generate the neighborhood aware additional (SOAR) assignments
-     *
-     * @param vectors the vectors to cluster
-     * @param kMeansIntermediate the output object to populate which minimally includes centroids,
-     *                     the prior assignments of the given vectors; care should be taken in
-     *                     passing in a valid output object with a centroids array that is the size of centroids expected
-     *                     and assignments that are the same size as the vectors.  The SOAR assignments are overwritten by this operation.
-     * @param clustersPerNeighborhood number of nearby neighboring centroids to be used to update the centroid positions.
-     * @param soarLambda   lambda used for SOAR assignments
-     *
-     * @throws IOException is thrown if vectors is inaccessible or if the clustersPerNeighborhood is less than 2
+     * This also is used to generate the neighborhood aware additional (SOAR) assignments.
      */
     final void cluster(
-        ClusteringFloatVectorValues vectors,
-        KMeansIntermediate kMeansIntermediate,
+        ClusteringVectorValues<V> vectors,
+        KMeansIntermediate<V> kMeansIntermediate,
         int clustersPerNeighborhood,
         float soarLambda
     ) throws IOException {
@@ -207,24 +219,14 @@ abstract class KMeansLocal {
     /**
      * cluster using a Lloyd kmeans algorithm that also considers prior clustered neighborhoods when adjusting centroids
      * this also is used to generate the neighborhood aware additional (SOAR) assignments
-     *
-     * @param vectors the vectors to cluster
-     * @param kMeansIntermediate the output object to populate which minimally includes centroids, the prior assignments of the given
-     *                           vectors; care should be taken in passing in a valid output object with a centroids array that is the size
-     *                           of centroids expected and assignments that are the same size as the vectors.
-     *                           The SOAR assignments are overwritten by this operation.
-     * @param clustersPerNeighborhood number of nearby neighboring centroids to be used to update the centroid positions.
-     * @param soarLambda   lambda used for SOAR assignments
-     *
-     * @throws IOException is thrown if vectors is inaccessible or if the clustersPerNeighborhood is less than 2
      */
     protected void doCluster(
-        ClusteringFloatVectorValues vectors,
-        KMeansIntermediate kMeansIntermediate,
+        ClusteringVectorValues<V> vectors,
+        KMeansIntermediate<V> kMeansIntermediate,
         int clustersPerNeighborhood,
         float soarLambda
     ) throws IOException {
-        float[][] centroids = kMeansIntermediate.centroids();
+        V[] centroids = kMeansIntermediate.centroids();
         boolean neighborAware = clustersPerNeighborhood != -1 && centroids.length > 1;
         NeighborHood[] neighborhoods = null;
         // if there are very few centroids, don't bother with neighborhoods or neighbor aware clustering
@@ -240,26 +242,8 @@ abstract class KMeansLocal {
     }
 
     protected abstract void innerCluster(
-        ClusteringFloatVectorValues vectors,
-        KMeansIntermediate kMeansIntermediate,
+        ClusteringVectorValues<V> vectors,
+        KMeansIntermediate<V> kMeansIntermediate,
         NeighborHood[] neighborhoods
     ) throws IOException;
-
-    protected static void deepCopy(float[][] source, float[][] destination) {
-        for (int i = 0; i < source.length; i++) {
-            System.arraycopy(source[i], 0, destination[i], 0, source[i].length);
-        }
-    }
-
-    // Computes: (sum_i sum_j pow(vecs1[i][j] - vecs2[i][j], 2)) / (sum_i sum_j pow(vecs2[i][j], 2))
-    protected static float normalizedFrobeniusNorm(float[][] vecs1, float[][] vecs2) {
-        assert vecs1.length == vecs2.length;
-        float result = 0;
-        float norm2 = 0;
-        for (int i = 0; i < vecs1.length; i++) {
-            result += ESVectorUtil.squareDistance(vecs1[i], vecs2[i]);
-            norm2 += ESVectorUtil.dotProduct(vecs2[i], vecs2[i]);
-        }
-        return MathUtils.sqrt(result / norm2);
-    }
 }

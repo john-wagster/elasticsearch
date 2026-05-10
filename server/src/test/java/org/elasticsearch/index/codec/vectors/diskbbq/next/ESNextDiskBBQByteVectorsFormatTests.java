@@ -16,6 +16,10 @@ import org.apache.lucene.document.Document;
 import org.apache.lucene.document.KnnByteVectorField;
 import org.apache.lucene.index.CodecReader;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.DocValuesSkipIndexType;
+import org.apache.lucene.index.DocValuesType;
+import org.apache.lucene.index.FieldInfo;
+import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.LeafReader;
@@ -28,12 +32,17 @@ import org.apache.lucene.store.Directory;
 import org.apache.lucene.tests.index.BaseKnnVectorsFormatTestCase;
 import org.apache.lucene.tests.util.TestUtil;
 import org.elasticsearch.common.logging.LogConfigurator;
+import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
+import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsWriter;
+import org.elasticsearch.index.codec.vectors.diskbbq.WriterVectorValues;
 import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper;
 import org.junit.AssumptionViolatedException;
 import org.junit.Before;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION;
 import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.MAX_CENTROIDS_PER_PARENT_CLUSTER;
@@ -43,6 +52,7 @@ import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVe
 import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.MIN_PRECONDITIONING_BLOCK_DIMS;
 import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.MIN_VECTORS_PER_CLUSTER;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.instanceOf;
 
 /**
  * Tests for byte vector support with the ESNext IVF disk BBQ vectors format.
@@ -124,11 +134,12 @@ public class ESNextDiskBBQByteVectorsFormatTests extends BaseKnnVectorsFormatTes
 
     @Override
     protected VectorSimilarityFunction randomSimilarity() {
-        return switch (random().nextInt(3)) {
+        return switch (random().nextInt(4)) {
             case 0 -> VectorSimilarityFunction.DOT_PRODUCT;
             case 1 -> VectorSimilarityFunction.EUCLIDEAN;
             case 2 -> VectorSimilarityFunction.COSINE;
-            default -> VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT;
+            case 3 -> VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT;
+            default -> throw new IllegalStateException("Unexpected value for similarity");
         };
     }
 
@@ -240,6 +251,73 @@ public class ESNextDiskBBQByteVectorsFormatTests extends BaseKnnVectorsFormatTes
         }
     }
 
+    /**
+     * Tests that {@link IVFVectorsWriter#createWriterVectorValues} returns {@link WriterVectorValues.FloatValues}
+     * for COSINE similarity (centroids are L2-normalized floats, rounding to bytes destroys precision),
+     * returns FloatValues for float-backed values, and returns {@link WriterVectorValues.ByteValues}
+     * only for non-COSINE byte-backed non-preconditioned values.
+     */
+    public void testCreateWriterVectorValuesCosineExclusion() {
+        int dims = 32;
+        List<byte[]> byteVectors = new ArrayList<>();
+        List<float[]> floatVectors = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            byteVectors.add(randomByteVector(dims));
+            floatVectors.add(new float[dims]);
+            for (int j = 0; j < dims; j++) {
+                floatVectors.get(i)[j] = byteVectors.get(i)[j];
+            }
+        }
+
+        // Byte-backed, non-preconditioned — should return ByteValues for non-COSINE similarities
+        KMeansFloatVectorValues byteBacked = KMeansFloatVectorValues.buildFromBytes(byteVectors, null, dims, false);
+        assertTrue(byteBacked.isByteBacked());
+        assertFalse(byteBacked.isPreconditioned());
+
+        for (VectorSimilarityFunction sim : new VectorSimilarityFunction[] {
+            VectorSimilarityFunction.EUCLIDEAN,
+            VectorSimilarityFunction.DOT_PRODUCT,
+            VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT }) {
+            FieldInfo fi = makeFieldInfo("test", dims, sim);
+            assertThat(IVFVectorsWriter.createWriterVectorValues(fi, byteBacked), instanceOf(WriterVectorValues.ByteValues.class));
+        }
+
+        FieldInfo cosineFi = makeFieldInfo("test", dims, VectorSimilarityFunction.COSINE);
+        assertThat(IVFVectorsWriter.createWriterVectorValues(cosineFi, byteBacked), instanceOf(WriterVectorValues.FloatValues.class));
+
+        // Float-backed — should always return FloatValues
+        KMeansFloatVectorValues floatBacked = KMeansFloatVectorValues.build(floatVectors, null, dims);
+        assertFalse(floatBacked.isByteBacked());
+        for (VectorSimilarityFunction sim : VectorSimilarityFunction.values()) {
+            FieldInfo fi = makeFieldInfo("test", dims, sim);
+            assertThat(IVFVectorsWriter.createWriterVectorValues(fi, floatBacked), instanceOf(WriterVectorValues.FloatValues.class));
+        }
+    }
+
+    /**
+     * Tests that {@link ESNextDiskBBQVectorsWriter#roundCentroidsToBytes} correctly rounds
+     * float centroids to byte values clamped to [-128, 127].
+     */
+    public void testRoundCentroidsToBytes() {
+        float[][] centroids = new float[][] {
+            { 0.0f, 1.0f, -1.0f, 0.5f, -0.5f, 0.4f, -0.4f },
+            { 127.0f, 128.0f, 200.0f, -128.0f, -129.0f, -200.0f, 127.4f },
+            { 127.6f, -128.6f, 0.5f, -0.5f, 1.5f, -1.5f, 2.5f }, };
+
+        byte[][] result = ESNextDiskBBQVectorsWriter.roundCentroidsToBytes(centroids);
+
+        assertEquals(3, result.length);
+
+        // Row 0: normal rounding
+        assertArrayEquals(new byte[] { 0, 1, -1, 1, 0, 0, 0 }, result[0]);
+
+        // Row 1: clamping at boundaries
+        assertArrayEquals(new byte[] { 127, 127, 127, -128, -128, -128, 127 }, result[1]);
+
+        // Row 2: rounding .5 — Math.round rounds .5 up (toward positive infinity)
+        assertArrayEquals(new byte[] { 127, -128, 1, 0, 2, -1, 3 }, result[2]);
+    }
+
     private static byte[] randomByteVector(int dimensions) {
         byte[] vector = new byte[dimensions];
         random().nextBytes(vector);
@@ -260,5 +338,28 @@ public class ESNextDiskBBQByteVectorsFormatTests extends BaseKnnVectorsFormatTes
             if (b != 0) return false;
         }
         return true;
+    }
+
+    private static FieldInfo makeFieldInfo(String name, int dims, VectorSimilarityFunction similarity) {
+        return new FieldInfo(
+            name,
+            0,
+            false,
+            false,
+            false,
+            IndexOptions.NONE,
+            DocValuesType.NONE,
+            DocValuesSkipIndexType.NONE,
+            -1,
+            Map.of(),
+            0,
+            0,
+            0,
+            dims,
+            VectorEncoding.BYTE,
+            similarity,
+            false,
+            false
+        );
     }
 }

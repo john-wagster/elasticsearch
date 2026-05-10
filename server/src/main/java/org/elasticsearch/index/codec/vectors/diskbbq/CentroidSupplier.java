@@ -24,7 +24,14 @@ public interface CentroidSupplier {
 
     float[] centroid(int centroidOrdinal) throws IOException;
 
-    default KMeansResult secondLevelClusters() throws IOException {
+    /**
+     * Returns the byte centroid for the given ordinal, or null if centroids are not byte-backed.
+     */
+    default byte[] byteCentroid(int centroidOrdinal) throws IOException {
+        return null;
+    }
+
+    default KMeansResult<float[]> secondLevelClusters() throws IOException {
         return null;
     }
 
@@ -35,10 +42,10 @@ public interface CentroidSupplier {
     KMeansFloatVectorValues asKmeansFloatVectorValues() throws IOException;
 
     static CentroidSupplier empty(int dims) {
-        return fromArray(new float[0][dims], KMeansResult.EMPTY, dims);
+        return fromArray(new float[0][dims], KMeansResult.emptyFloat(), dims);
     }
 
-    static CentroidSupplier fromArray(float[][] centroids, KMeansResult secondLevelClusters, int dims) {
+    static CentroidSupplier fromArray(float[][] centroids, KMeansResult<float[]> secondLevelClusters, int dims) {
         return new CentroidSupplier() {
             @Override
             public int size() {
@@ -51,13 +58,48 @@ public interface CentroidSupplier {
             }
 
             @Override
-            public KMeansResult secondLevelClusters() {
+            public KMeansResult<float[]> secondLevelClusters() {
                 return secondLevelClusters;
             }
 
             @Override
             public KMeansFloatVectorValues asKmeansFloatVectorValues() {
                 return KMeansFloatVectorValues.build(Arrays.asList(centroids), null, dims);
+            }
+        };
+    }
+
+    static CentroidSupplier fromByteArray(
+        byte[][] byteCentroids,
+        float[][] floatCentroids,
+        KMeansResult<float[]> secondLevelClusters,
+        int dims
+    ) {
+        assert byteCentroids.length == floatCentroids.length;
+        return new CentroidSupplier() {
+            @Override
+            public int size() {
+                return byteCentroids.length;
+            }
+
+            @Override
+            public float[] centroid(int centroidOrdinal) {
+                return floatCentroids[centroidOrdinal];
+            }
+
+            @Override
+            public byte[] byteCentroid(int centroidOrdinal) {
+                return byteCentroids[centroidOrdinal];
+            }
+
+            @Override
+            public KMeansResult<float[]> secondLevelClusters() {
+                return secondLevelClusters;
+            }
+
+            @Override
+            public KMeansFloatVectorValues asKmeansFloatVectorValues() {
+                return KMeansFloatVectorValues.build(Arrays.asList(floatCentroids), null, dims);
             }
         };
     }
