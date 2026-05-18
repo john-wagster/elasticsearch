@@ -46,7 +46,6 @@ public class IVFKnnByteSlicedVectorQueryTests extends LuceneTestCase {
     private static final String SLICE_FIELD = "_slice";
 
     static {
-        LogConfigurator.loadLog4jPlugins();
         LogConfigurator.configureESLogging();
     }
 

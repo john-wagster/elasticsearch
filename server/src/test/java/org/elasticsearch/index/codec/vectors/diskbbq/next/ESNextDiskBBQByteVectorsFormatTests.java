@@ -61,7 +61,6 @@ import static org.hamcrest.Matchers.instanceOf;
 public class ESNextDiskBBQByteVectorsFormatTests extends BaseKnnVectorsFormatTestCase {
 
     static {
-        LogConfigurator.loadLog4jPlugins();
         LogConfigurator.configureESLogging();
     }
 
