@@ -51,6 +51,7 @@ public final class PanamaESVectorUtilSupport implements ESVectorUtilSupport {
     private static final DefaultESVectorUtilSupport DEFAULT = new DefaultESVectorUtilSupport();
 
     private static final VectorSpecies<Float> FLOAT_SPECIES = PanamaVectorConstants.PREFERRED_FLOAT_SPECIES;
+    private static final VectorSpecies<Byte> PREFERRED_BYTE_SPECIES = PanamaVectorConstants.PREFERRED_BYTE_SPECIES;
     private static final VectorSpecies<Integer> INTEGER_SPECIES = PanamaVectorConstants.PREFERRED_INTEGER_SPECIES;
     private static final VectorSpecies<Long> LONG_SPECIES = PanamaVectorConstants.PREFERRED_LONG_SPECIES;
     /** Whether integer vectors can be trusted to actually be fast. */
@@ -468,6 +469,9 @@ public final class PanamaESVectorUtilSupport implements ESVectorUtilSupport {
         stats[5] = centroidDot;
     }
 
+    // Number of float-width parts per preferred byte vector (e.g. 4 on 128-bit, 2 on 256-bit, 1 on 512-bit)
+    private static final int BYTE_TO_FLOAT_PARTS = PREFERRED_BYTE_SPECIES.length() / FLOAT_SPECIES.length();
+
     @Override
     public void centerAndCalculateOSQStatsEuclidean(byte[] vector, byte[] centroid, float[] centered, float[] stats) {
         assert vector.length == centroid.length;
@@ -479,26 +483,30 @@ public final class PanamaESVectorUtilSupport implements ESVectorUtilSupport {
         float max = -Float.MAX_VALUE;
         int i = 0;
         int vectCount = 0;
-        if (vector.length > 2 * FLOAT_SPECIES.length()) {
+        if (vector.length >= PREFERRED_BYTE_SPECIES.length()) {
             FloatVector vecMeanVec = FloatVector.zero(FLOAT_SPECIES);
             FloatVector m2Vec = FloatVector.zero(FLOAT_SPECIES);
             FloatVector norm2Vec = FloatVector.zero(FLOAT_SPECIES);
             FloatVector minVec = FloatVector.broadcast(FLOAT_SPECIES, Float.MAX_VALUE);
             FloatVector maxVec = FloatVector.broadcast(FLOAT_SPECIES, -Float.MAX_VALUE);
             int count = 0;
-            for (; i < FLOAT_SPECIES.loopBound(vector.length); i += FLOAT_SPECIES.length()) {
-                ++count;
-                FloatVector v = (FloatVector) ByteVector.fromArray(BYTE_SPECIES_FOR_PREFFERED_FLOATS, vector, i).castShape(FLOAT_SPECIES, 0);
-                FloatVector c = (FloatVector) ByteVector.fromArray(BYTE_SPECIES_FOR_PREFFERED_FLOATS, centroid, i).castShape(FLOAT_SPECIES, 0);
-                FloatVector centeredVec = v.sub(c);
-                FloatVector deltaVec = centeredVec.sub(vecMeanVec);
-                norm2Vec = fma(centeredVec, centeredVec, norm2Vec);
-                vecMeanVec = vecMeanVec.add(deltaVec.mul(1f / count));
-                FloatVector delta2Vec = centeredVec.sub(vecMeanVec);
-                m2Vec = fma(deltaVec, delta2Vec, m2Vec);
-                minVec = minVec.min(centeredVec);
-                maxVec = maxVec.max(centeredVec);
-                centeredVec.intoArray(centered, i);
+            for (; i < PREFERRED_BYTE_SPECIES.loopBound(vector.length); i += PREFERRED_BYTE_SPECIES.length()) {
+                ByteVector bv = ByteVector.fromArray(PREFERRED_BYTE_SPECIES, vector, i);
+                ByteVector bc = ByteVector.fromArray(PREFERRED_BYTE_SPECIES, centroid, i);
+                for (int part = 0; part < BYTE_TO_FLOAT_PARTS; part++) {
+                    ++count;
+                    FloatVector v = (FloatVector) bv.castShape(FLOAT_SPECIES, part);
+                    FloatVector c = (FloatVector) bc.castShape(FLOAT_SPECIES, part);
+                    FloatVector centeredVec = v.sub(c);
+                    FloatVector deltaVec = centeredVec.sub(vecMeanVec);
+                    norm2Vec = fma(centeredVec, centeredVec, norm2Vec);
+                    vecMeanVec = vecMeanVec.add(deltaVec.mul(1f / count));
+                    FloatVector delta2Vec = centeredVec.sub(vecMeanVec);
+                    m2Vec = fma(deltaVec, delta2Vec, m2Vec);
+                    minVec = minVec.min(centeredVec);
+                    maxVec = maxVec.max(centeredVec);
+                    centeredVec.intoArray(centered, i + part * FLOAT_SPECIES.length());
+                }
             }
             min = minVec.reduceLanes(MIN);
             max = maxVec.reduceLanes(MAX);
@@ -547,10 +555,6 @@ public final class PanamaESVectorUtilSupport implements ESVectorUtilSupport {
 
     @Override
     public void centerAndCalculateOSQStatsDp(byte[] vector, byte[] centroid, float[] centered, float[] stats) {
-        if (BYTE_SPECIES_FOR_PREFFERED_FLOATS == null || vector.length < 2 * FLOAT_SPECIES.length()) {
-            DEFAULT.centerAndCalculateOSQStatsDp(vector, centroid, centered, stats);
-            return;
-        }
         assert vector.length == centroid.length;
         assert vector.length == centered.length;
         float vecMean = 0;
@@ -561,8 +565,7 @@ public final class PanamaESVectorUtilSupport implements ESVectorUtilSupport {
         float centroidDot = 0;
         int i = 0;
         int vectCount = 0;
-        int loopBound = FLOAT_SPECIES.loopBound(vector.length);
-        if (vector.length > 2 * FLOAT_SPECIES.length()) {
+        if (vector.length >= PREFERRED_BYTE_SPECIES.length()) {
             FloatVector vecMeanVec = FloatVector.zero(FLOAT_SPECIES);
             FloatVector m2Vec = FloatVector.zero(FLOAT_SPECIES);
             FloatVector norm2Vec = FloatVector.zero(FLOAT_SPECIES);
@@ -570,20 +573,24 @@ public final class PanamaESVectorUtilSupport implements ESVectorUtilSupport {
             FloatVector maxVec = FloatVector.broadcast(FLOAT_SPECIES, -Float.MAX_VALUE);
             FloatVector centroidDotVec = FloatVector.zero(FLOAT_SPECIES);
             int count = 0;
-            for (; i < loopBound; i += FLOAT_SPECIES.length()) {
-                ++count;
-                FloatVector v = (FloatVector) ByteVector.fromArray(BYTE_SPECIES_FOR_PREFFERED_FLOATS, vector, i).castShape(FLOAT_SPECIES, 0);
-                FloatVector c = (FloatVector) ByteVector.fromArray(BYTE_SPECIES_FOR_PREFFERED_FLOATS, centroid, i).castShape(FLOAT_SPECIES, 0);
-                centroidDotVec = fma(v, c, centroidDotVec);
-                FloatVector centeredVec = v.sub(c);
-                FloatVector deltaVec = centeredVec.sub(vecMeanVec);
-                norm2Vec = fma(centeredVec, centeredVec, norm2Vec);
-                vecMeanVec = vecMeanVec.add(deltaVec.mul(1f / count));
-                FloatVector delta2Vec = centeredVec.sub(vecMeanVec);
-                m2Vec = fma(deltaVec, delta2Vec, m2Vec);
-                minVec = minVec.min(centeredVec);
-                maxVec = maxVec.max(centeredVec);
-                centeredVec.intoArray(centered, i);
+            for (; i < PREFERRED_BYTE_SPECIES.loopBound(vector.length); i += PREFERRED_BYTE_SPECIES.length()) {
+                ByteVector bv = ByteVector.fromArray(PREFERRED_BYTE_SPECIES, vector, i);
+                ByteVector bc = ByteVector.fromArray(PREFERRED_BYTE_SPECIES, centroid, i);
+                for (int part = 0; part < BYTE_TO_FLOAT_PARTS; part++) {
+                    ++count;
+                    FloatVector v = (FloatVector) bv.castShape(FLOAT_SPECIES, part);
+                    FloatVector c = (FloatVector) bc.castShape(FLOAT_SPECIES, part);
+                    centroidDotVec = fma(v, c, centroidDotVec);
+                    FloatVector centeredVec = v.sub(c);
+                    FloatVector deltaVec = centeredVec.sub(vecMeanVec);
+                    norm2Vec = fma(centeredVec, centeredVec, norm2Vec);
+                    vecMeanVec = vecMeanVec.add(deltaVec.mul(1f / count));
+                    FloatVector delta2Vec = centeredVec.sub(vecMeanVec);
+                    m2Vec = fma(deltaVec, delta2Vec, m2Vec);
+                    minVec = minVec.min(centeredVec);
+                    maxVec = maxVec.max(centeredVec);
+                    centeredVec.intoArray(centered, i + part * FLOAT_SPECIES.length());
+                }
             }
             min = minVec.reduceLanes(MIN);
             max = maxVec.reduceLanes(MAX);
@@ -599,6 +606,7 @@ public final class PanamaESVectorUtilSupport implements ESVectorUtilSupport {
         float tailMean = 0;
         float tailM2 = 0;
         int tailCount = 0;
+        // handle the tail
         for (; i < vector.length; i++) {
             centroidDot = fma(vector[i], centroid[i], centroidDot);
             centered[i] = vector[i] - centroid[i];
@@ -1125,15 +1133,13 @@ public final class PanamaESVectorUtilSupport implements ESVectorUtilSupport {
     private static final VectorSpecies<Byte> BYTE_SPECIES_FOR_PREFFERED_FLOATS;
 
     static {
-        VectorSpecies<Byte> byteForFloat;
-        try {
-            // calculate vector size to convert from single bytes to 4-byte floats
-            byteForFloat = VectorSpecies.of(byte.class, VectorShape.forBitSize(PREFERRED_FLOAT_SPECIES.vectorBitSize() / Float.BYTES));
-        } catch (IllegalArgumentException e) {
-            // can't get a byte vector size small enough, just use default impl
-            byteForFloat = null;
-        }
-        BYTE_SPECIES_FOR_PREFFERED_FLOATS = byteForFloat;
+        // Calculate the byte species whose lane count matches the float species lane count,
+        // so that castShape(FLOAT_SPECIES, 0) widens byte lanes 1:1 into float lanes.
+        // Valid VectorShape bit sizes are 64, 128, 256, 512.
+        int byteBits = PREFERRED_FLOAT_SPECIES.vectorBitSize() / Float.BYTES;
+        BYTE_SPECIES_FOR_PREFFERED_FLOATS = (byteBits >= 64)
+            ? VectorSpecies.of(byte.class, VectorShape.forBitSize(byteBits))
+            : null;
     }
 
     public static float ipFloatByteImpl(float[] q, byte[] d) {
@@ -1629,8 +1635,6 @@ public final class PanamaESVectorUtilSupport implements ESVectorUtilSupport {
         quantQueryByte[index + quantQueryByte.length / 2] = (byte) upperMiddleByte;
         quantQueryByte[index + 3 * quantQueryByte.length / 4] = (byte) upperByte;
     }
-
-    private static final VectorSpecies<Byte> PREFERRED_BYTE_SPECIES = PanamaVectorConstants.PREFERRED_BYTE_SPECIES;
 
     @Override
     public int indexOf(final byte[] bytes, final int offset, final int length, final byte marker) {
