@@ -9,6 +9,8 @@
 
 package org.elasticsearch.index.codec.vectors.cluster;
 
+import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSupplier;
+
 import java.util.Arrays;
 import java.util.List;
 
@@ -20,10 +22,21 @@ import java.util.List;
 public class KMeansResult<V> {
     private V[] centroids;
     private final int[] assignments;
+    private int[] clusterCounts;
     private int[] soarAssignments;
 
-    private static final KMeansResult<float[]> FLOAT_EMPTY = new KMeansResult<>(new float[0][], new int[0], new int[0]);
-    private static final KMeansResult<byte[]> BYTE_EMPTY = new KMeansResult<>(new byte[0][], new int[0], new int[0]);
+    private static final KMeansResult<float[]> FLOAT_EMPTY = new KMeansResult<>(new float[0][], new int[0], new int[0]) {
+        @Override
+        public float[] getCentroid(int vectorOrdinal) {
+            return null;
+        }
+    };
+    private static final KMeansResult<byte[]> BYTE_EMPTY = new KMeansResult<>(new byte[0][], new int[0], new int[0]) {
+        @Override
+        public byte[] getCentroid(int vectorOrdinal) {
+            return null;
+        }
+    };
 
     @SuppressWarnings("unchecked")
     public static <V> KMeansResult<V> empty(CentroidOps<V> ops) {
@@ -52,6 +65,7 @@ public class KMeansResult<V> {
         this.centroids = centroids;
         this.assignments = assignments;
         this.soarAssignments = soarAssignments;
+        clusterCounts = new int[centroids.length];
     }
 
     public V getCentroid(int vectorOrdinal) {
@@ -65,12 +79,23 @@ public class KMeansResult<V> {
         return centroids;
     }
 
-    void setCentroids(V[] centroids) {
+    void setCentroids(V[] centroids, int[] clusterCounts) {
         this.centroids = centroids;
+        this.clusterCounts = clusterCounts;
+    }
+
+    @SuppressWarnings("unchecked")
+    public CentroidSupplier centroidsSupplier() {
+        float[][] floatCentroids = (float[][]) (Object) centroids;
+        return CentroidSupplier.fromArray(floatCentroids, FLOAT_EMPTY, floatCentroids[0].length);
     }
 
     public int[] assignments() {
         return assignments;
+    }
+
+    public int[] clusterCounts() {
+        return clusterCounts;
     }
 
     void setSoarAssignments(int[] soarAssignments) {

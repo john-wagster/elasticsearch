@@ -44,6 +44,7 @@ import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantizedVectorValues;
 import org.elasticsearch.index.codec.vectors.diskbbq.VectorPreconditioner;
 import org.elasticsearch.index.codec.vectors.diskbbq.WriterVectorValues;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.IvfSegmentConfig;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.simdvec.ES940OSQVectorsScorer;
@@ -145,7 +146,8 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
     }
 
     @Override
-    protected Preconditioner inheritPreconditioner(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
+    protected Preconditioner inheritPreconditioner(FieldInfo fieldInfo, MergeState mergeState, IvfSegmentConfig ivfSegmentConfig)
+        throws IOException {
         if (doPrecondition) {
             for (KnnVectorsReader reader : mergeState.knnVectorsReaders) {
                 if (reader instanceof VectorPreconditioner) {
@@ -156,13 +158,13 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
                 }
             }
             // else
-            return createPreconditioner(fieldInfo.getVectorDimension());
+            return createPreconditioner(fieldInfo.getVectorDimension(), ivfSegmentConfig);
         }
         return null;
     }
 
     @Override
-    protected Preconditioner createPreconditioner(int dimension) {
+    protected Preconditioner createPreconditioner(int dimension, IvfSegmentConfig ivfSegmentConfig) {
         if (doPrecondition) {
             return Preconditioner.createPreconditioner(dimension, blockDimension);
         } else {
@@ -178,7 +180,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
     }
 
     @Override
-    protected Consumer<List<float[]>> preconditionVectors(Preconditioner preconditioner) {
+    protected Consumer<List<float[]>> preconditionVectors(Preconditioner preconditioner, IvfSegmentConfig ivfSegmentConfig) {
         return (vectors) -> {
             if (doPrecondition == false || vectors.isEmpty()) {
                 return;
@@ -196,7 +198,11 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
     }
 
     @Override
-    protected FloatVectorValues preconditionVectors(Preconditioner preconditioner, FloatVectorValues vectors) {
+    protected FloatVectorValues preconditionVectors(
+        Preconditioner preconditioner,
+        FloatVectorValues vectors,
+        IvfSegmentConfig ivfSegmentConfig
+    ) {
         if (doPrecondition == false) {
             return vectors;
         }
@@ -255,7 +261,8 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
         IndexOutput postingsOutput,
         long fileOffset,
         int[] assignments,
-        int[] overspillAssignments
+        int[] overspillAssignments,
+        IvfSegmentConfig ivfSegmentConfig
     ) throws IOException {
         KMeansResult<float[]> centroidClusters = centroidSupplier.secondLevelClusters();
         int[] centroidVectorCount = new int[centroidSupplier.size()];
@@ -348,7 +355,8 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
         long fileOffset,
         MergeState mergeState,
         int[] assignments,
-        int[] overspillAssignments
+        int[] overspillAssignments,
+        IvfSegmentConfig ivfSegmentConfig
     ) throws IOException {
         // first, quantize all the vectors into a temporary file
         var vectorSimilarityFunction = fieldInfo.getVectorSimilarityFunction();
@@ -583,7 +591,8 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter {
         long preconditionerOffset,
         long preconditionerLength,
         int numberOfSlices,
-        int maxSliceSize
+        int maxSliceSize,
+        IvfSegmentConfig ivfSegmentConfig
     ) throws IOException {
         metaOutput.writeInt(ES940OSQVectorsScorer.BULK_SIZE);
         metaOutput.writeInt(quantEncoding.id());

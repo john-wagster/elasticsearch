@@ -12,9 +12,11 @@ package org.elasticsearch.index.codec.vectors.cluster;
 import org.apache.lucene.search.TaskExecutor;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.hnsw.IntToIntFunction;
+import org.elasticsearch.simdvec.ESVectorUtil;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.Callable;
@@ -234,6 +236,7 @@ abstract class KMeansLocal<V> {
             neighborhoods = computeNeighborhoods(centroids, clustersPerNeighborhood);
         }
         innerCluster(vectors, kMeansIntermediate, neighborhoods);
+        removeEmptyClusters(kMeansIntermediate, neighborhoods);
         if (neighborAware && soarLambda >= 0) {
             assert kMeansIntermediate.soarAssignments().length == 0;
             kMeansIntermediate.setSoarAssignments(new int[vectors.size()]);
@@ -246,4 +249,93 @@ abstract class KMeansLocal<V> {
         KMeansIntermediate<V> kMeansIntermediate,
         NeighborHood[] neighborhoods
     ) throws IOException;
+
+    protected static void deepCopy(float[][] source, float[][] destination) {
+        for (int i = 0; i < source.length; i++) {
+            System.arraycopy(source[i], 0, destination[i], 0, source[i].length);
+        }
+    }
+
+    // Computes: (sum_i sum_j pow(vecs1[i][j] - vecs2[i][j], 2)) / (sum_i sum_j pow(vecs2[i][j], 2))
+    protected static float normalizedFrobeniusNorm(float[][] vecs1, float[][] vecs2) {
+        assert vecs1.length == vecs2.length;
+        float result = 0;
+        float norm2 = 0;
+        for (int i = 0; i < vecs1.length; i++) {
+            result += ESVectorUtil.squareDistance(vecs1[i], vecs2[i]);
+            norm2 += ESVectorUtil.dotProduct(vecs2[i], vecs2[i]);
+        }
+        return (float) Math.sqrt(result / norm2);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void removeEmptyClusters(KMeansIntermediate kMeansIntermediate, NeighborHood[] neighborhoods) {
+        float[][] centroids = (float[][]) kMeansIntermediate.centroids();
+        int[] assignments = kMeansIntermediate.assignments();
+        int[] centroidVectorCount = kMeansIntermediate.clusterCounts();
+
+        Arrays.fill(centroidVectorCount, 0, centroids.length, 0);
+
+        // handle assignment here so we can track distance and cluster size
+        int effectiveCluster = -1;
+        int effectiveK = 0;
+        for (int assignment : assignments) {
+            centroidVectorCount[assignment]++;
+            // this cluster has received an assignment, its now effective, but only count it once
+            if (centroidVectorCount[assignment] == 1) {
+                effectiveK++;
+                effectiveCluster = assignment;
+            }
+        }
+
+        if (effectiveK == 1) {
+            final float[][] singleClusterCentroid = new float[1][];
+            singleClusterCentroid[0] = centroids[effectiveCluster];
+            final int[] singleClusterCounts = new int[1];
+            singleClusterCounts[0] = assignments.length;
+            kMeansIntermediate.setCentroids(singleClusterCentroid, singleClusterCounts);
+            Arrays.fill(kMeansIntermediate.assignments(), 0);
+            return;
+        }
+
+        if (effectiveK == centroids.length) {
+            return;
+        }
+
+        // TODO eventually, we should get rid of this allocation by overhauling how centroids
+        // are stored and handled in KMeansResult
+        final float[][] newCentroids = new float[effectiveK][centroids[0].length];
+        final int[] newClusterCounts = new int[effectiveK];
+        final int[] centroidIndexMap = new int[centroids.length];
+        int currentCluster = 0;
+        for (int c = 0; c < centroids.length; c++) {
+            if (centroidVectorCount[c] > 0) {
+                centroidIndexMap[c] = currentCluster;
+                System.arraycopy(centroids[c], 0, newCentroids[currentCluster], 0, centroids[c].length);
+                newClusterCounts[currentCluster] = centroidVectorCount[c];
+                currentCluster++;
+            }
+        }
+
+        for (int i = 0; i < assignments.length; i++) {
+            if (centroidVectorCount[assignments[i]] > 0) {
+                assignments[i] = centroidIndexMap[assignments[i]];
+            }
+        }
+        kMeansIntermediate.setCentroids(newCentroids, newClusterCounts);
+
+        if (neighborhoods != null) {
+            // This change will cause that neighborhoods.length > newCentroids.length.
+            // Doing it like this avoids more memory allocations and is fine as long as
+            // we do not use neighborhoods.length to get the number of clusters.
+            for (int c = 0; c < centroids.length; c++) {
+                neighborhoods[centroidIndexMap[c]] = neighborhoods[c];
+                int[] neighbors = neighborhoods[c].neighbors();
+                for (int i = 0; i < neighbors.length; i++) {
+                    neighbors[i] = centroidIndexMap[neighbors[i]];
+                }
+                neighborhoods[centroidIndexMap[c]] = neighborhoods[c];
+            }
+        }
+    }
 }
