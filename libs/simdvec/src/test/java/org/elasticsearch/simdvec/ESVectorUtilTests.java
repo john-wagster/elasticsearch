@@ -303,6 +303,7 @@ public class ESVectorUtilTests extends BaseVectorizationTests {
 
     public void testCenterAndCalculateOSQStatsDpByteByteCentroid() {
         int size = random().nextInt(128, 512);
+        float delta = 1e-3f * size;
         var vector = new byte[size];
         var centroid = new byte[size];
         random().nextBytes(vector);
@@ -314,13 +315,14 @@ public class ESVectorUtilTests extends BaseVectorizationTests {
         // byte[],byte[] via Panama
         var centeredBBPanama = new float[size];
         var statsBBPanama = new float[6];
-        defOrPanamaProvider.getVectorUtilSupport().centerAndCalculateOSQStatsDp(vector, centroid, centeredBBPanama, statsBBPanama);
-        assertArrayEquals(centeredBB, centeredBBPanama, 0f);
-        assertArrayEquals(statsBB, statsBBPanama, 0f);
+        panamaProvider.getVectorUtilSupport().centerAndCalculateOSQStatsDp(vector, centroid, centeredBBPanama, statsBBPanama);
+        assertArrayEquals(centeredBB, centeredBBPanama, delta);
+        assertArrayEquals(statsBB, statsBBPanama, delta);
     }
 
     public void testCenterAndCalculateOSQStatsEuclideanByteByteCentroid() {
         int size = random().nextInt(128, 512);
+        float delta = 1e-3f * size;
         var vector = new byte[size];
         var centroid = new byte[size];
         random().nextBytes(vector);
@@ -332,9 +334,9 @@ public class ESVectorUtilTests extends BaseVectorizationTests {
         // byte[],byte[] via Panama
         var centeredBBPanama = new float[size];
         var statsBBPanama = new float[5];
-        defOrPanamaProvider.getVectorUtilSupport().centerAndCalculateOSQStatsEuclidean(vector, centroid, centeredBBPanama, statsBBPanama);
-        assertArrayEquals(centeredBB, centeredBBPanama, 0f);
-        assertArrayEquals(statsBB, statsBBPanama, 0f);
+        panamaProvider.getVectorUtilSupport().centerAndCalculateOSQStatsEuclidean(vector, centroid, centeredBBPanama, statsBBPanama);
+        assertArrayEquals(centeredBB, centeredBBPanama, delta);
+        assertArrayEquals(statsBB, statsBBPanama, delta);
     }
 
     public void testOsqLoss() {
