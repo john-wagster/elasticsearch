@@ -12,7 +12,6 @@ package org.elasticsearch.index.codec.vectors.cluster;
 import org.apache.lucene.search.TaskExecutor;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.hnsw.IntToIntFunction;
-import org.elasticsearch.simdvec.ESVectorUtil;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -236,7 +235,7 @@ abstract class KMeansLocal<V> {
             neighborhoods = computeNeighborhoods(centroids, clustersPerNeighborhood);
         }
         innerCluster(vectors, kMeansIntermediate, neighborhoods);
-        removeEmptyClusters(kMeansIntermediate, neighborhoods);
+        removeEmptyClusters(kMeansIntermediate, neighborhoods, ops);
         if (neighborAware && soarLambda >= 0) {
             assert kMeansIntermediate.soarAssignments().length == 0;
             kMeansIntermediate.setSoarAssignments(new int[vectors.size()]);
@@ -250,27 +249,12 @@ abstract class KMeansLocal<V> {
         NeighborHood[] neighborhoods
     ) throws IOException;
 
-    protected static void deepCopy(float[][] source, float[][] destination) {
-        for (int i = 0; i < source.length; i++) {
-            System.arraycopy(source[i], 0, destination[i], 0, source[i].length);
-        }
-    }
-
-    // Computes: (sum_i sum_j pow(vecs1[i][j] - vecs2[i][j], 2)) / (sum_i sum_j pow(vecs2[i][j], 2))
-    protected static float normalizedFrobeniusNorm(float[][] vecs1, float[][] vecs2) {
-        assert vecs1.length == vecs2.length;
-        float result = 0;
-        float norm2 = 0;
-        for (int i = 0; i < vecs1.length; i++) {
-            result += ESVectorUtil.squareDistance(vecs1[i], vecs2[i]);
-            norm2 += ESVectorUtil.dotProduct(vecs2[i], vecs2[i]);
-        }
-        return (float) Math.sqrt(result / norm2);
-    }
-
-    @SuppressWarnings("unchecked")
-    private static void removeEmptyClusters(KMeansIntermediate kMeansIntermediate, NeighborHood[] neighborhoods) {
-        float[][] centroids = (float[][]) kMeansIntermediate.centroids();
+    private static <V> void removeEmptyClusters(
+        KMeansIntermediate<V> kMeansIntermediate,
+        NeighborHood[] neighborhoods,
+        CentroidOps<V> ops
+    ) {
+        V[] centroids = kMeansIntermediate.centroids();
         int[] assignments = kMeansIntermediate.assignments();
         int[] centroidVectorCount = kMeansIntermediate.clusterCounts();
 
@@ -289,8 +273,9 @@ abstract class KMeansLocal<V> {
         }
 
         if (effectiveK == 1) {
-            final float[][] singleClusterCentroid = new float[1][];
-            singleClusterCentroid[0] = centroids[effectiveCluster];
+            int dims = ops.length(centroids[0]);
+            V[] singleClusterCentroid = ops.newCentroidArray(1, dims);
+            ops.initCentroid(singleClusterCentroid[0], centroids[effectiveCluster], dims);
             final int[] singleClusterCounts = new int[1];
             singleClusterCounts[0] = assignments.length;
             kMeansIntermediate.setCentroids(singleClusterCentroid, singleClusterCounts);
@@ -304,14 +289,15 @@ abstract class KMeansLocal<V> {
 
         // TODO eventually, we should get rid of this allocation by overhauling how centroids
         // are stored and handled in KMeansResult
-        final float[][] newCentroids = new float[effectiveK][centroids[0].length];
+        int dims = ops.length(centroids[0]);
+        final V[] newCentroids = ops.newCentroidArray(effectiveK, dims);
         final int[] newClusterCounts = new int[effectiveK];
         final int[] centroidIndexMap = new int[centroids.length];
         int currentCluster = 0;
         for (int c = 0; c < centroids.length; c++) {
             if (centroidVectorCount[c] > 0) {
                 centroidIndexMap[c] = currentCluster;
-                System.arraycopy(centroids[c], 0, newCentroids[currentCluster], 0, centroids[c].length);
+                ops.initCentroid(newCentroids[currentCluster], centroids[c], dims);
                 newClusterCounts[currentCluster] = centroidVectorCount[c];
                 currentCluster++;
             }

@@ -442,7 +442,13 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                             byte[] overspillByteCentroid = centroidSupplier.byteCentroid(s);
                             float[] overspillParentCentroid = centroidClusters.getCentroid(s);
                             assert overspillByteCentroid != null : "byte-backed vectors should always have a byte centroid";
-                            result = quantizer.scalarQuantize(byteVector, scratch, quantized, effectiveQuantEncoding.bits(), overspillByteCentroid);
+                            result = quantizer.scalarQuantize(
+                                byteVector,
+                                scratch,
+                                quantized,
+                                effectiveQuantEncoding.bits(),
+                                overspillByteCentroid
+                            );
                             if (overspillParentCentroid != null) {
                                 float[] vector = bv.vectorValue(i);
                                 float additionalCorrection = vectorSimilarityFunction == VectorSimilarityFunction.EUCLIDEAN

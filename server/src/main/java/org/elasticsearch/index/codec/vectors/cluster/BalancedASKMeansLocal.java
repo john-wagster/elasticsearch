@@ -202,11 +202,6 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
 
         float[] cumulativeClusterWeights = new float[k]; // maintains soft cluster counts for each cluster.
                                                          // Used to compute the learning rate in the SGD update of the centroids
-        for (int idx = 0; idx < k; idx++) {
-            if (assignments[idx] == -1) {
-                cumulativeClusterWeights[assignments[idx]]++;
-            }
-        }
 
         OnlineQuantileEstimator medianEstimator = null; // We cannot initialize the estimator now because we need to know its range.
 

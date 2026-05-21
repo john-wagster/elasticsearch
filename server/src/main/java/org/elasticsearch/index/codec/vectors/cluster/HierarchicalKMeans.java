@@ -26,7 +26,7 @@ public class HierarchicalKMeans<V> {
     public static final int SAMPLES_PER_CLUSTER_DEFAULT = 64;
     public static final float DEFAULT_SOAR_LAMBDA = 1.0f;
     public static final int NO_SOAR_ASSIGNMENT = -1;
-    private static final int MIN_VECTORS_PRE_THREAD = 64;
+    private static final int MIN_VECTORS_PER_THREAD = 64;
 
     public static final boolean USE_BALANCING = true;
     public static final int MAX_ITERATIONS_DEFAULT = USE_BALANCING ? 2 : 6;
@@ -214,7 +214,7 @@ public class HierarchicalKMeans<V> {
     }
 
     private KMeansLocal<V> buildKmeansLocal(int numVectors, int localSampleSize) {
-        int numWorkers = Math.min(this.numWorkers, numVectors / MIN_VECTORS_PRE_THREAD);
+        int numWorkers = Math.min(this.numWorkers, numVectors / MIN_VECTORS_PER_THREAD);
         // if there is no executor or there is no enough vectors for more than one thread, use the serial version
         if (USE_BALANCING) {
             return executor == null || numWorkers <= 1
@@ -228,7 +228,7 @@ public class HierarchicalKMeans<V> {
     }
 
     private KMeansLocal<V> buildKmeansLocalFinal(int numVectors, int localSampleSize) {
-        int numWorkers = Math.min(this.numWorkers, numVectors / MIN_VECTORS_PRE_THREAD);
+        int numWorkers = Math.min(this.numWorkers, numVectors / MIN_VECTORS_PER_THREAD);
         // if there is no executor or there is no enough vectors for more than one thread, use the serial version
         if (USE_BALANCING) {
             return executor == null || numWorkers <= 1

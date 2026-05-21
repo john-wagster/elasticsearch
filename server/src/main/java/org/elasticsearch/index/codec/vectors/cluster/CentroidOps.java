@@ -233,7 +233,7 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
 
         @Override
         public void arrayCopy(float[][] src, int srcPos, float[][] dest, int destPos, int length) {
-            System.arraycopy(src, 0, dest, destPos, length);
+            System.arraycopy(src, srcPos, dest, destPos, length);
         }
 
         @Override
