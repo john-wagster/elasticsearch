@@ -177,9 +177,8 @@ public class MapperFeatures implements FeatureSpecification {
             IP_MAPPER_CARDINALITY_OPTION,
             KEYWORD_NORMALIZER_SKIP_STORE_SETTING,
             KEYWORD_MULTI_FIELDS_NOT_STORED_WHEN_IGNORED,
-            ROUTING_AS_DOC_VALUES,
+             ROUTING_AS_DOC_VALUES,
             ANALYZER_WRAPPER_RELOADABLE_SEARCH_ANALYZER,
-            ROUTING_AS_DOC_VALUES,
             ROUTING_AS_DOC_VALUES_BY_DEFAULT,
             BBQ_DISK_BYTE_ELEMENT_TYPE
         );

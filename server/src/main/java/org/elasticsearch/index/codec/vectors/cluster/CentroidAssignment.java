@@ -124,6 +124,10 @@ public final class CentroidAssignment {
      * <p>
      * For float centroids, this accumulates directly into the centroid arrays.
      * For byte centroids, this uses int[] accumulators and rounds back to byte.
+     *
+     * @param byteAccumulators pre-allocated {@code int[k][dim]} array for byte centroid accumulation,
+     *                         or {@code null} for float centroids. Reusing this across iterations avoids
+     *                         repeated allocation in the inner loop.
      */
     static <V> void updateCentroids(
         ClusteringVectorValues<V> vectors,
@@ -132,7 +136,8 @@ public final class CentroidAssignment {
         IntToIntFunction ordTranslator,
         FixedBitSet[] centroidChangedSlices,
         int[] centroidCounts,
-        int[] assignments
+        int[] assignments,
+        int[][] byteAccumulators
     ) throws IOException {
         Arrays.fill(centroidCounts, 0);
         FixedBitSet centroidChanged = centroidChangedSlices[0];
@@ -153,17 +158,26 @@ public final class CentroidAssignment {
                 centroidCounts,
                 ordTranslator,
                 assignments,
-                dim
+                dim,
+                byteAccumulators
             );
         } else {
-            updateCentroidsFloat(vectors, ops, centroids, centroidChanged, centroidCounts, ordTranslator, assignments, dim);
+            updateCentroidsFloat(
+                vectors,
+                (CentroidOps.FloatOps) ops,
+                centroids,
+                centroidChanged,
+                centroidCounts,
+                ordTranslator,
+                assignments,
+                dim
+            );
         }
     }
 
-    @SuppressWarnings("unchecked")
     private static <V> void updateCentroidsFloat(
         ClusteringVectorValues<V> vectors,
-        CentroidOps<V> ops,
+        CentroidOps.FloatOps ops,
         V[] centroids,
         FixedBitSet centroidChanged,
         int[] centroidCounts,
@@ -174,8 +188,8 @@ public final class CentroidAssignment {
         for (int idx = 0; idx < vectors.size(); idx++) {
             final int assignment = assignments[ordTranslator.apply(idx)];
             if (centroidChanged.get(assignment)) {
-                V centroid = centroids[assignment];
-                V vector = vectors.vectorValue(idx);
+                float[] centroid = (float[]) centroids[assignment];
+                float[] vector = (float[]) vectors.vectorValue(idx);
                 if (centroidCounts[assignment]++ == 0) {
                     ops.initCentroid(centroid, vector, dim);
                 } else {
@@ -188,7 +202,7 @@ public final class CentroidAssignment {
             if (centroidChanged.get(clusterIdx)) {
                 float count = (float) centroidCounts[clusterIdx];
                 if (count > 0) {
-                    ops.divide(centroids[clusterIdx], count, dim);
+                    ops.divide((float[]) centroids[clusterIdx], count, dim);
                 }
             }
         }
@@ -202,13 +216,13 @@ public final class CentroidAssignment {
         int[] centroidCounts,
         IntToIntFunction ordTranslator,
         int[] assignments,
-        int dim
+        int dim,
+        int[][] accumulators
     ) throws IOException {
-        // Use int[][] accumulators to avoid byte overflow
-        int[][] accumulators = new int[centroids.length][];
+        // Zero only the rows for changed centroids
         for (int i = 0; i < centroids.length; i++) {
             if (centroidChanged.get(i)) {
-                accumulators[i] = new int[dim];
+                Arrays.fill(accumulators[i], 0);
             }
         }
 

@@ -86,8 +86,10 @@ public class KMeansResult<V> {
 
     @SuppressWarnings("unchecked")
     public CentroidSupplier centroidsSupplier() {
-        float[][] floatCentroids = (float[][]) (Object) centroids;
-        return CentroidSupplier.fromArray(floatCentroids, FLOAT_EMPTY, floatCentroids[0].length);
+        // TODO: update this in a subsequent PR to support byte[] as well
+        float[][] floatCentroids = (float[][]) centroids;
+        int dims = floatCentroids.length > 0 ? floatCentroids[0].length : 0;
+        return CentroidSupplier.fromArray(floatCentroids, FLOAT_EMPTY, dims);
     }
 
     public int[] assignments() {
@@ -119,15 +121,7 @@ public class KMeansResult<V> {
             numCentroids += result.centroids().length;
             numAssignments += result.assignments().length;
         }
-        // Use ops to get dimension from the first non-empty result
-        int dim = 0;
-        for (KMeansResult<V> result : results) {
-            if (result.centroids().length > 0) {
-                dim = ops.length(result.centroids()[0]);
-                break;
-            }
-        }
-        V[] centroids = ops.newCentroidArray(numCentroids, dim);
+        V[] centroids = ops.newCentroidArrayShallow(numCentroids);
         int[] assignments = new int[numAssignments];
         int[] spillAssignments = new int[numAssignments];
         int centroidOffset = 0;

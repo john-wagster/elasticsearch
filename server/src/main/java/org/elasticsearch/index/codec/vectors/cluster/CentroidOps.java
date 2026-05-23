@@ -67,6 +67,9 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
     /** Allocate a 2D centroid array of shape {@code [k][dims]}. */
     V[] newCentroidArray(int k, int dims);
 
+    /** Allocate a 1D centroid array of length {@code k} with null inner elements. */
+    V[] newCentroidArrayShallow(int k);
+
     /** Element-wise deep copy from {@code source} to {@code destination}. */
     void deepCopy(V[] source, V[] destination);
 
@@ -79,43 +82,10 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
     // ---- Centroid update operations ----
 
     /**
-     * Set all elements of the centroid to zero (or the appropriate identity).
-     * For float: fill with 0.0f. For byte: fill with 0.
-     */
-    void zeroCentroid(V centroid);
-
-    /**
      * Copy the contents of {@code vector} into {@code centroid} (first assignment).
      * Equivalent to {@code System.arraycopy(vector, 0, centroid, 0, dim)}.
      */
     void initCentroid(V centroid, V vector, int dim);
-
-    /**
-     * Accumulate a vector into a centroid: {@code centroid[d] += vector[d]}.
-     * <p>
-     * For byte centroids, this accumulates into an {@code int[]} scratch internally
-     * managed by the ops instance; call {@link #divide} to round back to byte.
-     */
-    void accumulate(V centroid, V vector, int dim);
-
-    /**
-     * Divide each element of the centroid by {@code count} and finalize.
-     * For float: {@code centroid[d] /= count}.
-     * For byte: divide the accumulated int values and round/clamp to {@code [-128, 127]}.
-     */
-    void divide(V centroid, float count, int dim);
-
-    /**
-     * SGD linear combination: {@code dest[d] += scale * src[d]}.
-     * For byte: widens to float, blends, rounds back to byte.
-     */
-    void linearCombination(float scale, V src, V dest);
-
-    /**
-     * SGD linear combination: {@code b[d] = scaleA * a[d] + scaleB * b[d]}.
-     * For byte: widens to float, blends, rounds back to byte.
-     */
-    void linearCombination(float scaleA, V a, float scaleB, V b);
 
     /**
      * Compute {@code diffs[d] = vector[d] - centroid[d]} as floats (for SOAR residuals).
@@ -225,6 +195,11 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
         }
 
         @Override
+        public float[][] newCentroidArrayShallow(int k) {
+            return new float[k][];
+        }
+
+        @Override
         public void deepCopy(float[][] source, float[][] destination) {
             for (int i = 0; i < source.length; i++) {
                 System.arraycopy(source[i], 0, destination[i], 0, source[i].length);
@@ -242,37 +217,45 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
         }
 
         @Override
-        public void zeroCentroid(float[] centroid) {
-            java.util.Arrays.fill(centroid, 0.0f);
-        }
-
-        @Override
         public void initCentroid(float[] centroid, float[] vector, int dim) {
             System.arraycopy(vector, 0, centroid, 0, dim);
         }
 
-        @Override
-        public void accumulate(float[] centroid, float[] vector, int dim) {
+        /**
+         * Accumulate a vector into a centroid: {@code centroid[d] += vector[d]}.
+         * This is a float-only operation; byte centroids use {@code int[]} accumulators
+         * in {@code CentroidAssignment.updateCentroidsByte()} to avoid overflow.
+         */
+        void accumulate(float[] centroid, float[] vector, int dim) {
             for (int d = 0; d < dim; d++) {
                 centroid[d] += vector[d];
             }
         }
 
-        @Override
-        public void divide(float[] centroid, float count, int dim) {
+        /**
+         * Divide each element of the centroid by {@code count}: {@code centroid[d] /= count}.
+         * Float-only; byte centroids divide from {@code int[]} accumulators and round once.
+         */
+        void divide(float[] centroid, float count, int dim) {
             for (int d = 0; d < dim; d++) {
                 centroid[d] /= count;
             }
         }
 
-        @Override
-        public void linearCombination(float scale, float[] src, float[] dest) {
+        /**
+         * SGD linear combination: {@code dest[d] += scale * src[d]}.
+         * Float-only; byte SGD operates on float shadow arrays via {@code ESVectorUtil}.
+         */
+        void linearCombination(float scale, float[] src, float[] dest) {
             ESVectorUtil.linearCombination(scale, src, dest);
         }
 
-        @Override
-        public void linearCombination(float scaleA, float[] a, float scaleB, float[] b) {
-            ESVectorUtil.linearCombination(scaleA, a, scaleB, b);
+        /**
+         * SGD linear combination: {@code dest[d] = scaleOther * other[d] + scaleDest * dest[d]}.
+         * Float-only; byte SGD operates on float shadow arrays via {@code ESVectorUtil}.
+         */
+        void linearCombination(float scaleOther, float[] other, float scaleDest, float[] dest) {
+            ESVectorUtil.linearCombination(scaleOther, other, scaleDest, dest);
         }
 
         @Override
@@ -303,9 +286,8 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
     /**
      * {@link CentroidOps} for {@code byte[]} vectors and centroids.
      * <p>
-     * Centroid averaging accumulates to {@code int} precision internally and rounds
-     * back to {@code byte} (clamped to {@code [-128, 127]}) during {@link #divide}.
-     * SGD updates ({@link #linearCombination}) widen to float, blend, and round back.
+     * Centroid averaging uses {@code int[]} accumulators (see {@code CentroidAssignment.updateCentroidsByte}).
+     * SGD updates use float shadow arrays (see {@code BalancedASKMeansLocal}, {@code BalancedOTKMeansLocal}).
      */
     final class ByteOps implements CentroidOps<byte[]> {
 
@@ -344,17 +326,7 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
 
         @Override
         public float soarDistance(byte[] vector, byte[] centroid, float[] diffs, float soarLambda, float vectorCentroidDist) {
-            // SOAR distance: ||x-c||^2 + lambda * ((x-c1)^T (x-c))^2 / ||x-c1||^2
-            // diffs = x - c1 (precomputed as float[])
-            // We compute (x-c) dot diffs, and ||x-c||^2
-            float sqDist = 0;
-            float dotDiff = 0;
-            for (int i = 0; i < vector.length; i++) {
-                float xMinusC = vector[i] - centroid[i];
-                sqDist += xMinusC * xMinusC;
-                dotDiff += diffs[i] * xMinusC;
-            }
-            return sqDist + soarLambda * (dotDiff * dotDiff) / vectorCentroidDist;
+            return ESVectorUtil.soarDistance(vector, centroid, diffs, soarLambda, vectorCentroidDist);
         }
 
         @Override
@@ -369,10 +341,7 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
             float vectorCentroidDist,
             float[] distances
         ) {
-            distances[0] = soarDistance(vector, c0, diffs, soarLambda, vectorCentroidDist);
-            distances[1] = soarDistance(vector, c1, diffs, soarLambda, vectorCentroidDist);
-            distances[2] = soarDistance(vector, c2, diffs, soarLambda, vectorCentroidDist);
-            distances[3] = soarDistance(vector, c3, diffs, soarLambda, vectorCentroidDist);
+            ESVectorUtil.soarDistanceBulk(vector, c0, c1, c2, c3, diffs, soarLambda, vectorCentroidDist, distances);
         }
 
         @Override
@@ -387,11 +356,12 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
 
         @Override
         public byte[][] newCentroidArray(int k, int dims) {
-            byte[][] result = new byte[k][];
-            for (int i = 0; i < k; i++) {
-                result[i] = new byte[dims];
-            }
-            return result;
+            return new byte[k][dims];
+        }
+
+        @Override
+        public byte[][] newCentroidArrayShallow(int k) {
+            return new byte[k][];
         }
 
         @Override
@@ -412,55 +382,8 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
         }
 
         @Override
-        public void zeroCentroid(byte[] centroid) {
-            java.util.Arrays.fill(centroid, (byte) 0);
-        }
-
-        @Override
         public void initCentroid(byte[] centroid, byte[] vector, int dim) {
             System.arraycopy(vector, 0, centroid, 0, dim);
-        }
-
-        /**
-         * For byte centroids, accumulation must happen in wider precision.
-         * This method performs element-wise addition treating both arrays as byte values,
-         * but the caller is responsible for managing overflow via the accumulator pattern
-         * in {@link CentroidAssignment}.
-         */
-        @Override
-        public void accumulate(byte[] centroid, byte[] vector, int dim) {
-            // This simple byte accumulation will overflow after ~1 vector.
-            // The actual accumulation for byte centroids happens in CentroidUpdater
-            // which uses int[] scratch. This method is a fallback for the interface contract.
-            for (int d = 0; d < dim; d++) {
-                centroid[d] += vector[d];
-            }
-        }
-
-        @Override
-        public void divide(byte[] centroid, float count, int dim) {
-            // Round and clamp each element
-            for (int d = 0; d < dim; d++) {
-                centroid[d] = (byte) Math.clamp(Math.round(centroid[d] / count), -128, 127);
-            }
-        }
-
-        @Override
-        public void linearCombination(float scale, byte[] src, byte[] dest) {
-            // dest[d] += scale * src[d], rounded to byte
-            for (int d = 0; d < src.length; d++) {
-                float blended = scale * src[d] + dest[d];
-                dest[d] = (byte) Math.clamp(Math.round(blended), -128, 127);
-            }
-        }
-
-        @Override
-        public void linearCombination(float scaleA, byte[] a, float scaleB, byte[] b) {
-            // b[d] = scaleA * a[d] + scaleB * b[d], rounded to byte
-            for (int d = 0; d < a.length; d++) {
-                float blended = scaleA * a[d] + scaleB * b[d];
-                b[d] = (byte) Math.clamp(Math.round(blended), -128, 127);
-            }
         }
 
         @Override
@@ -495,18 +418,5 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
             }
             return result;
         }
-    }
-
-    /**
-     * Returns the appropriate {@link CentroidOps} instance for the given centroid class.
-     */
-    @SuppressWarnings("unchecked")
-    static <V> CentroidOps<V> forClass(Class<V> clazz) {
-        if (clazz == float[].class) {
-            return (CentroidOps<V>) FloatOps.INSTANCE;
-        } else if (clazz == byte[].class) {
-            return (CentroidOps<V>) ByteOps.INSTANCE;
-        }
-        throw new IllegalArgumentException("Unsupported centroid type: " + clazz);
     }
 }

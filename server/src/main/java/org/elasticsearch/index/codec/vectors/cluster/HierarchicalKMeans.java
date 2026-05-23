@@ -128,7 +128,7 @@ public class HierarchicalKMeans<V> {
         // if we have a small number of vectors calculate the centroid directly
         if (vectors.size() <= targetSize) {
             V centroid;
-            if (ops instanceof CentroidOps.ByteOps byteOps) {
+            if (ops instanceof CentroidOps.ByteOps) {
                 // Accumulate in int precision to avoid byte overflow, then round once
                 int[] acc = new int[dimension];
                 for (int i = 0; i < vectors.size(); i++) {
@@ -146,12 +146,16 @@ public class HierarchicalKMeans<V> {
                 V typed = (V) byteCentroid;
                 centroid = typed;
             } else {
-                centroid = ops.newCentroid(dimension);
+                CentroidOps.FloatOps floatOps = (CentroidOps.FloatOps) ops;
+                float[] centroidF = floatOps.newCentroid(dimension);
                 for (int i = 0; i < vectors.size(); i++) {
-                    V vector = vectors.vectorValue(i);
-                    ops.accumulate(centroid, vector, dimension);
+                    float[] vector = (float[]) vectors.vectorValue(i);
+                    floatOps.accumulate(centroidF, vector, dimension);
                 }
-                ops.divide(centroid, vectors.size(), dimension);
+                floatOps.divide(centroidF, vectors.size(), dimension);
+                @SuppressWarnings("unchecked")
+                V typed = (V) centroidF;
+                centroid = typed;
             }
             V[] centroids = ops.newCentroidArray(1, 0);
             centroids[0] = centroid;
@@ -278,7 +282,7 @@ public class HierarchicalKMeans<V> {
         int newCentroidsSize = current.centroids().length + subPartitions.centroids().length - 1;
 
         // update based on the outcomes from the split clusters recursion
-        V[] newCentroids = ops.newCentroidArray(newCentroidsSize, 0);
+        V[] newCentroids = ops.newCentroidArrayShallow(newCentroidsSize);
         int[] newClusterCounts = new int[newCentroidsSize];
 
         // copy centroids prior to the split

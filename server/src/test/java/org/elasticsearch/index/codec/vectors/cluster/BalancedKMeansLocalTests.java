@@ -41,6 +41,7 @@ public class BalancedKMeansLocalTests extends ESTestCase {
 
     public void testBalancedKMeans() throws IOException {
         // Test to compare LloydKMeansLocal and BalancedKMeansLocal.
+        // This test uses float vectors specifically because it computes inertia via VectorUtil.squareDistance.
 
         int nClusters = 20;
         int nVectors = nClusters * 256;
@@ -56,14 +57,13 @@ public class BalancedKMeansLocalTests extends ESTestCase {
 
         float[] inertias = new float[methods.size()];
         float[] stdClusterSizes = new float[methods.size()];
-        // Both geometric means are computed in log domain for numerical stability.
-        double geoMeanInertiaRatio = 0; // the geometric mean of the ratios between both inertias
-        double geoMeanStdClusterSizes = 0; // the geometric mean of the ratios between the standard deviations of the cluster sizes
+        double geoMeanInertiaRatio = 0;
+        double geoMeanStdClusterSizes = 0;
 
         int nTrials = 10;
 
         for (int trials = 0; trials < nTrials; trials++) {
-            KMeansFloatVectorValues vectors = generateData(nVectors, dims, nClusters, 0.5f);
+            KMeansFloatVectorValues vectors = generateFloatData(nVectors, dims, nClusters, 0.5f);
 
             for (int j = 0; j < methods.size(); j++) {
                 float[][] centroids = KMeansLocal.pickInitialCentroids(vectors, nClusters, CentroidOps.FLOAT);
@@ -77,7 +77,6 @@ public class BalancedKMeansLocalTests extends ESTestCase {
             }
 
             geoMeanInertiaRatio += Math.log(inertias[0] / inertias[1]);
-            // adding a small constant in case stdClusterSizes[0] == 0:
             geoMeanStdClusterSizes += Math.log((stdClusterSizes[1] + 1e-6f) / (stdClusterSizes[0] + 1e-6f));
         }
 
@@ -88,6 +87,41 @@ public class BalancedKMeansLocalTests extends ESTestCase {
         assertTrue(geoMeanInertiaRatio > 0.8);
         // We ask for 3X decrease in the size distribution.
         assertTrue(geoMeanStdClusterSizes < 0.33);
+    }
+
+    public void testBalancedOTKMeansLocal() throws IOException {
+        int nClusters = randomIntBetween(2, 10);
+        int nVectors = nClusters * randomIntBetween(50, 200);
+        int dims = randomIntBetween(4, 32);
+        int sampleSize = randomIntBetween(100, nVectors);
+        int maxIterations = randomIntBetween(2, 20);
+
+        boolean useByte = randomBoolean();
+        if (useByte) {
+            ClusteringByteVectorValues vectors = generateByteData(nVectors, dims, nClusters);
+            byte[][] centroids = KMeansLocal.pickInitialCentroids(vectors, nClusters, CentroidOps.BYTE);
+            int[] assignments = new int[nVectors];
+            KMeansIntermediate<byte[]> kMeansIntermediate = new KMeansIntermediate<>(centroids, assignments);
+
+            KMeansLocal<byte[]> kMeansLocal = new BalancedOTKMeansLocalSerial<>(CentroidOps.BYTE, sampleSize, maxIterations);
+            kMeansLocal.cluster(vectors, kMeansIntermediate, nClusters, -1f);
+
+            for (int a : kMeansIntermediate.assignments()) {
+                assertTrue("Invalid assignment: " + a, a >= 0 && a < centroids.length);
+            }
+        } else {
+            KMeansFloatVectorValues vectors = generateFloatData(nVectors, dims, nClusters, 0.5f);
+            float[][] centroids = KMeansLocal.pickInitialCentroids(vectors, nClusters, CentroidOps.FLOAT);
+            int[] assignments = new int[nVectors];
+            KMeansIntermediate<float[]> kMeansIntermediate = new KMeansIntermediate<>(centroids, assignments);
+
+            KMeansLocal<float[]> kMeansLocal = new BalancedOTKMeansLocalSerial<>(CentroidOps.FLOAT, sampleSize, maxIterations);
+            kMeansLocal.cluster(vectors, kMeansIntermediate, nClusters, -1f);
+
+            for (int a : kMeansIntermediate.assignments()) {
+                assertTrue("Invalid assignment: " + a, a >= 0 && a < centroids.length);
+            }
+        }
     }
 
     static float kMeansMeanInertia(KMeansFloatVectorValues vectors, KMeansIntermediate<float[]> kMeansIntermediate) throws IOException {
@@ -127,43 +161,75 @@ public class BalancedKMeansLocalTests extends ESTestCase {
         int clustersPerNeighborhood = 128;
         float soarLambda = 1.0f;
         int nVectors = 1000;
-        List<float[]> vectors = new ArrayList<>();
-        for (int i = 0; i < nVectors; i++) {
-            float[] vector = new float[5];
-            vectors.add(vector);
-        }
-        int sampleSize = vectors.size();
-        KMeansFloatVectorValues fvv = KMeansFloatVectorValues.build(vectors, null, 5);
 
-        float[][] centroids = KMeansLocal.pickInitialCentroids(fvv, nClusters, CentroidOps.FLOAT);
-        BalancedOTKMeansLocal.cluster(fvv, CentroidOps.FLOAT, centroids, sampleSize, maxIterations);
+        boolean useByte = randomBoolean();
+        if (useByte) {
+            List<byte[]> vectors = new ArrayList<>();
+            for (int i = 0; i < nVectors; i++) {
+                vectors.add(new byte[5]);
+            }
+            int sampleSize = vectors.size();
+            ClusteringByteVectorValues bvv = ClusteringByteVectorValues.build(vectors, null, 5);
 
-        int[] assignments = new int[vectors.size()];
-        int[] assignmentOrdinals = new int[vectors.size()];
-        for (int i = 0; i < vectors.size(); i++) {
-            float minDist = Float.MAX_VALUE;
-            int ord = -1;
-            for (int j = 0; j < centroids.length; j++) {
-                float dist = VectorUtil.squareDistance(fvv.vectorValue(i), centroids[j]);
-                if (dist < minDist) {
-                    minDist = dist;
-                    ord = j;
+            byte[][] centroids = KMeansLocal.pickInitialCentroids(bvv, nClusters, CentroidOps.BYTE);
+            BalancedOTKMeansLocal.cluster(bvv, CentroidOps.BYTE, centroids, sampleSize, maxIterations);
+
+            int[] assignments = new int[vectors.size()];
+            int[] assignmentOrdinals = new int[vectors.size()];
+            for (int i = 0; i < vectors.size(); i++) {
+                assignments[i] = 0;
+                assignmentOrdinals[i] = i;
+            }
+
+            KMeansIntermediate<byte[]> kMeansIntermediate = new KMeansIntermediate<>(centroids, assignments, i -> assignmentOrdinals[i]);
+            KMeansLocal<byte[]> kMeansLocal = new BalancedOTKMeansLocalSerial<>(CentroidOps.BYTE, sampleSize, maxIterations);
+            kMeansLocal.cluster(bvv, kMeansIntermediate, clustersPerNeighborhood, soarLambda);
+
+            assertEquals(nClusters, centroids.length);
+            assertNotNull(kMeansIntermediate.soarAssignments());
+            for (byte[] centroid : centroids) {
+                for (byte v : centroid) {
+                    assertEquals(0, v);
                 }
             }
-            assignments[i] = ord;
-            assignmentOrdinals[i] = i;
-        }
+        } else {
+            List<float[]> vectors = new ArrayList<>();
+            for (int i = 0; i < nVectors; i++) {
+                vectors.add(new float[5]);
+            }
+            int sampleSize = vectors.size();
+            KMeansFloatVectorValues fvv = KMeansFloatVectorValues.build(vectors, null, 5);
 
-        KMeansIntermediate<float[]> kMeansIntermediate = new KMeansIntermediate<>(centroids, assignments, i -> assignmentOrdinals[i]);
-        KMeansLocal<float[]> kMeansLocal = new BalancedOTKMeansLocalSerial<>(CentroidOps.FLOAT, sampleSize, maxIterations);
-        kMeansLocal.cluster(fvv, kMeansIntermediate, clustersPerNeighborhood, soarLambda);
+            float[][] centroids = KMeansLocal.pickInitialCentroids(fvv, nClusters, CentroidOps.FLOAT);
+            BalancedOTKMeansLocal.cluster(fvv, CentroidOps.FLOAT, centroids, sampleSize, maxIterations);
 
-        assertEquals(nClusters, centroids.length);
-        assertNotNull(kMeansIntermediate.soarAssignments());
-        for (float[] centroid : centroids) {
-            for (float v : centroid) {
-                if (v > 0.0000001f) {
-                    assertEquals(0.0f, v, 0.00000001f);
+            int[] assignments = new int[vectors.size()];
+            int[] assignmentOrdinals = new int[vectors.size()];
+            for (int i = 0; i < vectors.size(); i++) {
+                float minDist = Float.MAX_VALUE;
+                int ord = -1;
+                for (int j = 0; j < centroids.length; j++) {
+                    float dist = VectorUtil.squareDistance(fvv.vectorValue(i), centroids[j]);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        ord = j;
+                    }
+                }
+                assignments[i] = ord;
+                assignmentOrdinals[i] = i;
+            }
+
+            KMeansIntermediate<float[]> kMeansIntermediate = new KMeansIntermediate<>(centroids, assignments, i -> assignmentOrdinals[i]);
+            KMeansLocal<float[]> kMeansLocal = new BalancedOTKMeansLocalSerial<>(CentroidOps.FLOAT, sampleSize, maxIterations);
+            kMeansLocal.cluster(fvv, kMeansIntermediate, clustersPerNeighborhood, soarLambda);
+
+            assertEquals(nClusters, centroids.length);
+            assertNotNull(kMeansIntermediate.soarAssignments());
+            for (float[] centroid : centroids) {
+                for (float v : centroid) {
+                    if (v > 0.0000001f) {
+                        assertEquals(0.0f, v, 0.00000001f);
+                    }
                 }
             }
         }
@@ -176,58 +242,66 @@ public class BalancedKMeansLocalTests extends ESTestCase {
         int sampleSize = random().nextInt(100, nVectors + 1);
         int maxIterations = random().nextInt(0, 100);
         // We require clustersPerNeighborhood > nClusters so that neighborhoods are not used in BalancedOTKMeansLocalSerial
-        // (this path is not use in production, just for the test).
         int clustersPerNeighborhood = random().nextInt(11, 512);
         float soarLambda = random().nextFloat(0.5f, 1.5f);
-        KMeansFloatVectorValues vectors = generateData(nVectors, dims, nClusters, 0.5f);
 
-        float[][] centroids = KMeansLocal.pickInitialCentroids(vectors, nClusters, CentroidOps.FLOAT);
-        LloydKMeansLocal.cluster(vectors, CentroidOps.FLOAT, centroids, sampleSize, maxIterations);
+        boolean useByte = randomBoolean();
+        if (useByte) {
+            ClusteringByteVectorValues vectors = generateByteData(nVectors, dims, nClusters);
+            byte[][] centroids = KMeansLocal.pickInitialCentroids(vectors, nClusters, CentroidOps.BYTE);
+            LloydKMeansLocal.cluster(vectors, CentroidOps.BYTE, centroids, sampleSize, maxIterations);
 
-        int[] assignments = new int[vectors.size()];
-        int[] assignmentOrdinals = new int[vectors.size()];
-        for (int i = 0; i < vectors.size(); i++) {
-            float minDist = Float.MAX_VALUE;
-            int ord = -1;
-            for (int j = 0; j < centroids.length; j++) {
-                float dist = VectorUtil.squareDistance(vectors.vectorValue(i), centroids[j]);
-                if (dist < minDist) {
-                    minDist = dist;
-                    ord = j;
+            int[] assignments = new int[vectors.size()];
+            int[] assignmentOrdinals = new int[vectors.size()];
+            for (int i = 0; i < vectors.size(); i++) {
+                float minDist = Float.MAX_VALUE;
+                int ord = -1;
+                byte[] vec = vectors.vectorValue(i);
+                for (int j = 0; j < centroids.length; j++) {
+                    float dist = CentroidOps.BYTE.squareDistance(vec, centroids[j]);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        ord = j;
+                    }
                 }
+                assignments[i] = ord;
+                assignmentOrdinals[i] = i;
             }
-            assignments[i] = ord;
-            assignmentOrdinals[i] = i;
-        }
 
-        KMeansIntermediate<float[]> kMeansIntermediate = new KMeansIntermediate<>(centroids, assignments, i -> assignmentOrdinals[i]);
-        KMeansLocal<float[]> kMeansLocal = new BalancedOTKMeansLocalSerial<>(CentroidOps.FLOAT, sampleSize, maxIterations);
-        kMeansLocal.cluster(vectors, kMeansIntermediate, clustersPerNeighborhood, soarLambda);
+            KMeansIntermediate<byte[]> kMeansIntermediate = new KMeansIntermediate<>(centroids, assignments, i -> assignmentOrdinals[i]);
+            KMeansLocal<byte[]> kMeansLocal = new BalancedOTKMeansLocalSerial<>(CentroidOps.BYTE, sampleSize, maxIterations);
+            kMeansLocal.cluster(vectors, kMeansIntermediate, clustersPerNeighborhood, soarLambda);
 
-        assertEquals(nClusters, centroids.length);
-        assertNotNull(kMeansIntermediate.soarAssignments());
-    }
+            assertEquals(nClusters, centroids.length);
+            assertNotNull(kMeansIntermediate.soarAssignments());
+        } else {
+            KMeansFloatVectorValues vectors = generateFloatData(nVectors, dims, nClusters, 0.5f);
+            float[][] centroids = KMeansLocal.pickInitialCentroids(vectors, nClusters, CentroidOps.FLOAT);
+            LloydKMeansLocal.cluster(vectors, CentroidOps.FLOAT, centroids, sampleSize, maxIterations);
 
-    private static KMeansFloatVectorValues generateData(int nSamples, int nDims, int nClusters, float standardDeviationPreCluster) {
-        List<float[]> vectors = new ArrayList<>(nSamples);
-        float[][] centroids = new float[nClusters][nDims];
-        // Generate random centroids
-        for (int i = 0; i < nClusters; i++) {
-            for (int j = 0; j < nDims; j++) {
-                centroids[i][j] = random().nextFloat();
+            int[] assignments = new int[vectors.size()];
+            int[] assignmentOrdinals = new int[vectors.size()];
+            for (int i = 0; i < vectors.size(); i++) {
+                float minDist = Float.MAX_VALUE;
+                int ord = -1;
+                for (int j = 0; j < centroids.length; j++) {
+                    float dist = VectorUtil.squareDistance(vectors.vectorValue(i), centroids[j]);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        ord = j;
+                    }
+                }
+                assignments[i] = ord;
+                assignmentOrdinals[i] = i;
             }
-        }
-        // Generate data points around centroids
-        for (int i = 0; i < nSamples; i++) {
-            int cluster = random().nextInt(nClusters);
-            float[] vector = new float[nDims];
-            for (int j = 0; j < nDims; j++) {
-                vector[j] = centroids[cluster][j] + (float) random().nextGaussian() * standardDeviationPreCluster;
-            }
-            vectors.add(vector);
-        }
 
-        return KMeansFloatVectorValues.build(vectors, null, nDims);
+            KMeansIntermediate<float[]> kMeansIntermediate = new KMeansIntermediate<>(centroids, assignments, i -> assignmentOrdinals[i]);
+            KMeansLocal<float[]> kMeansLocal = new BalancedOTKMeansLocalSerial<>(CentroidOps.FLOAT, sampleSize, maxIterations);
+            kMeansLocal.cluster(vectors, kMeansIntermediate, clustersPerNeighborhood, soarLambda);
+
+            assertEquals(nClusters, centroids.length);
+            assertNotNull(kMeansIntermediate.soarAssignments());
+        }
     }
 
     public void testConcurrency() throws IOException {
@@ -240,7 +314,7 @@ public class BalancedKMeansLocalTests extends ESTestCase {
         final float soarLambda = -1;
         final int numThreads = randomIntBetween(2, 8);
 
-        KMeansFloatVectorValues vectors = generateData(nVectors, dims, 1, 0.2f);
+        KMeansFloatVectorValues vectors = generateFloatData(nVectors, dims, 1, 0.2f);
 
         try (ExecutorService executorService = Executors.newFixedThreadPool(numThreads)) {
             TaskExecutor taskExecutor = new TaskExecutor(executorService);
@@ -261,15 +335,55 @@ public class BalancedKMeansLocalTests extends ESTestCase {
                 methods.get(j).cluster(vectors, kMeansIntermediate, nClusters, soarLambda);
 
                 inertias[j] = kMeansMeanInertia(vectors, kMeansIntermediate);
-                int[] clusterSizes = clusterSizes(kMeansIntermediate);
+                int[] clusterSizesArr = clusterSizes(kMeansIntermediate);
 
-                stdClusterSizes[j] = clusterSizesStandardDeviation(clusterSizes);
-                minClusterSizes[j] = Arrays.stream(clusterSizes).min().getAsInt();
+                stdClusterSizes[j] = clusterSizesStandardDeviation(clusterSizesArr);
+                minClusterSizes[j] = Arrays.stream(clusterSizesArr).min().getAsInt();
             }
 
             assertEquals(inertias[0], inertias[1], 2e-4 * inertias[0]);
             assertEquals(stdClusterSizes[0], stdClusterSizes[1], 2e-1 * stdClusterSizes[0]);
             assertEquals(minClusterSizes[0], minClusterSizes[1], 2e-1 * minClusterSizes[0]);
         }
+    }
+
+    // ---- Data generators ----
+
+    private static KMeansFloatVectorValues generateFloatData(int nSamples, int nDims, int nClusters, float standardDeviationPreCluster) {
+        List<float[]> vectors = new ArrayList<>(nSamples);
+        float[][] centroids = new float[nClusters][nDims];
+        for (int i = 0; i < nClusters; i++) {
+            for (int j = 0; j < nDims; j++) {
+                centroids[i][j] = random().nextFloat();
+            }
+        }
+        for (int i = 0; i < nSamples; i++) {
+            int cluster = random().nextInt(nClusters);
+            float[] vector = new float[nDims];
+            for (int j = 0; j < nDims; j++) {
+                vector[j] = centroids[cluster][j] + (float) random().nextGaussian() * standardDeviationPreCluster;
+            }
+            vectors.add(vector);
+        }
+        return KMeansFloatVectorValues.build(vectors, null, nDims);
+    }
+
+    private static ClusteringByteVectorValues generateByteData(int nSamples, int nDims, int nClusters) {
+        List<byte[]> vectors = new ArrayList<>(nSamples);
+        byte[][] centroids = new byte[nClusters][nDims];
+        for (int i = 0; i < nClusters; i++) {
+            for (int j = 0; j < nDims; j++) {
+                centroids[i][j] = (byte) randomIntBetween(-128, 127);
+            }
+        }
+        for (int i = 0; i < nSamples; i++) {
+            int cluster = random().nextInt(nClusters);
+            byte[] vector = new byte[nDims];
+            for (int j = 0; j < nDims; j++) {
+                vector[j] = (byte) Math.clamp(centroids[cluster][j] + randomIntBetween(-10, 10), -128, 127);
+            }
+            vectors.add(vector);
+        }
+        return ClusteringByteVectorValues.build(vectors, null, nDims);
     }
 }

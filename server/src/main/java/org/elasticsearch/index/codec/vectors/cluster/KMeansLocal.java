@@ -35,10 +35,10 @@ abstract class KMeansLocal<V> {
         this.ops = ops;
     }
 
-    /** Number of workers to use for parallelism **/
+    /** Number of workers to use for parallelism */
     protected abstract int numWorkers();
 
-    /** assign to each vector the soar assignment **/
+    /** assign to each vector the soar assignment */
     protected abstract void assignSpilled(
         ClusteringVectorValues<V> vectors,
         KMeansIntermediate<V> kmeansIntermediate,

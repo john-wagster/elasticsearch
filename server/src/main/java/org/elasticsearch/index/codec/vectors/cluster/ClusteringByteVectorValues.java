@@ -10,6 +10,7 @@
 package org.elasticsearch.index.codec.vectors.cluster;
 
 import org.apache.lucene.store.IndexInput;
+import org.apache.lucene.store.RandomAccessInput;
 
 import java.io.IOException;
 import java.util.List;
@@ -156,15 +157,16 @@ public final class ClusteringByteVectorValues implements ClusteringVectorValues<
 
     private static final class OffHeapDocSupplier implements DocSupplier {
         private final IndexInput docs;
+        private final RandomAccessInput randomDocs;
 
-        OffHeapDocSupplier(IndexInput docs) {
+        OffHeapDocSupplier(IndexInput docs) throws IOException {
             this.docs = docs;
+            this.randomDocs = docs.randomAccessSlice(0, docs.length());
         }
 
         @Override
         public int ordToDoc(int ord) {
             try {
-                var randomDocs = docs.randomAccessSlice(0, docs.length());
                 return randomDocs.readInt((long) ord * Integer.BYTES);
             } catch (IOException e) {
                 throw new java.io.UncheckedIOException(e);
@@ -173,7 +175,11 @@ public final class ClusteringByteVectorValues implements ClusteringVectorValues<
 
         @Override
         public DocSupplier copy() {
-            return new OffHeapDocSupplier(docs.clone());
+            try {
+                return new OffHeapDocSupplier(docs.clone());
+            } catch (IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
         }
     }
 }

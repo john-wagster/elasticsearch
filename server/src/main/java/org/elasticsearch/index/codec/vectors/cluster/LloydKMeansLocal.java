@@ -33,10 +33,10 @@ abstract class LloydKMeansLocal<V> extends KMeansLocal<V> {
         this.maxIterations = maxIterations;
     }
 
-    /** Number of workers to use for parallelism **/
+    /** Number of workers to use for parallelism */
     protected abstract int numWorkers();
 
-    /** assign to each vector the closest centroid **/
+    /** assign to each vector the closest centroid */
     protected abstract boolean stepLloyd(
         ClusteringVectorValues<V> vectors,
         IntToIntFunction translateOrd,
@@ -46,7 +46,7 @@ abstract class LloydKMeansLocal<V> extends KMeansLocal<V> {
         NeighborHood[] neighborHoods
     ) throws IOException;
 
-    /** assign to each vector the soar assignment **/
+    /** assign to each vector the soar assignment */
     protected abstract void assignSpilled(
         ClusteringVectorValues<V> vectors,
         KMeansIntermediate<V> kmeansIntermediate,
@@ -82,6 +82,7 @@ abstract class LloydKMeansLocal<V> extends KMeansLocal<V> {
             centroidChangedSlices[i] = new FixedBitSet(centroids.length);
         }
         int[] centroidCounts = new int[centroids.length];
+        int[][] byteAccumulators = (ops instanceof CentroidOps.ByteOps) ? new int[k][vectors.dimension()] : null;
         for (int i = 0; i < maxIterations; i++) {
             // This is potentially sampled, so we need to translate ordinals
             if (stepLloyd(sampledVectors, ordTranslator, centroids, centroidChangedSlices, assignments, neighborhoods)) {
@@ -92,7 +93,8 @@ abstract class LloydKMeansLocal<V> extends KMeansLocal<V> {
                     ordTranslator,
                     centroidChangedSlices,
                     centroidCounts,
-                    assignments
+                    assignments,
+                    byteAccumulators
                 );
             } else {
                 break;
@@ -109,7 +111,8 @@ abstract class LloydKMeansLocal<V> extends KMeansLocal<V> {
                     ordTranslator,
                     centroidChangedSlices,
                     centroidCounts,
-                    assignments
+                    assignments,
+                    byteAccumulators
                 );
             }
         }

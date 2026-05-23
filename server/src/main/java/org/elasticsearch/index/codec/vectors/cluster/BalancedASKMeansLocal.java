@@ -50,10 +50,10 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
         this.miniBatchSize = -2;
     }
 
-    /** Number of workers to use for parallelism **/
+    /** Number of workers to use for parallelism */
     protected abstract int numWorkers();
 
-    /** compute the distance from every vector to every centroid **/
+    /** compute the distance from every vector to every centroid */
     private void computeDistances(
         ClusteringVectorValues<V> vectors,
         V[] centroids,
@@ -121,17 +121,19 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
         return argmin;
     }
 
-    /** update the centroids using stochastic gradient descent **/
+    /** update the centroids using stochastic gradient descent */
     protected void updateCentroids(
         ClusteringVectorValues<V> vectors,
         float[] cumulativeClusterWeights,
         int[] assignments,
         V[] centroids,
-        float[][] floatShadow
+        float[][] floatCentroidsShadow
     ) throws IOException {
+        // The SGD learning rate is computed as 1 / (clusterCount + learningRateShift).
+        // Using a shift so that the updates are gentle and small.
         float learningRateShift = 3.f * this.sampleSize / centroids.length;
 
-        if (floatShadow != null) {
+        if (floatCentroidsShadow != null) {
             // Byte path: SGD in float precision, round to byte for distance computation
             int dim = vectors.dimension();
             for (int idx = 0; idx < vectors.size(); idx++) {
@@ -139,29 +141,27 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
                 int k = assignments[idx];
                 cumulativeClusterWeights[k]++;
                 float lr = 1.f / (cumulativeClusterWeights[k] + learningRateShift);
-                float oneMinusLr = 1 - lr;
-                for (int d = 0; d < dim; d++) {
-                    floatShadow[k][d] = lr * vec[d] + oneMinusLr * floatShadow[k][d];
-                }
+                ESVectorUtil.linearCombination(lr, vec, 1 - lr, floatCentroidsShadow[k]);
                 // Round back to byte centroid for distance computation
                 byte[] byteCentroid = (byte[]) centroids[k];
                 for (int d = 0; d < dim; d++) {
-                    byteCentroid[d] = (byte) Math.clamp(Math.round(floatShadow[k][d]), -128, 127);
+                    byteCentroid[d] = (byte) Math.clamp(Math.round(floatCentroidsShadow[k][d]), -128, 127);
                 }
             }
         } else {
-            // Float path: original behavior
+            // Float path
+            CentroidOps.FloatOps floatOps = (CentroidOps.FloatOps) ops;
             for (int idx = 0; idx < vectors.size(); idx++) {
                 V vec = vectors.vectorValue(idx);
                 int k = assignments[idx];
                 cumulativeClusterWeights[k]++;
-                float learning_rate = 1.f / (cumulativeClusterWeights[k] + learningRateShift);
-                ops.linearCombination(learning_rate, vec, 1 - learning_rate, centroids[k]);
+                float learningRate = 1.f / (cumulativeClusterWeights[k] + learningRateShift);
+                floatOps.linearCombination(learningRate, (float[]) vec, 1 - learningRate, (float[]) centroids[k]);
             }
         }
     }
 
-    /** assign to each vector the closest centroid **/
+    /** assign to each vector the closest centroid */
     protected abstract void assign(
         ClusteringVectorValues<V> vectors,
         IntToIntFunction ordTranslator,
@@ -202,13 +202,18 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
 
         float[] cumulativeClusterWeights = new float[k]; // maintains soft cluster counts for each cluster.
                                                          // Used to compute the learning rate in the SGD update of the centroids
+        for (int idx = 0; idx < n; idx++) {
+            if (assignments[idx] != -1) {
+                cumulativeClusterWeights[assignments[idx]]++;
+            }
+        }
 
         OnlineQuantileEstimator medianEstimator = null; // We cannot initialize the estimator now because we need to know its range.
 
         // For byte centroids, maintain float shadow to avoid rounding noise during SGD
-        float[][] floatShadow = null;
+        float[][] floatCentroidsShadow = null;
         if (ops instanceof CentroidOps.ByteOps) {
-            floatShadow = ops.toFloatCentroids(centroids);
+            floatCentroidsShadow = ops.toFloatCentroids(centroids);
         }
 
         int t = 0;
@@ -252,7 +257,7 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
                 assignMiniBatch(distances, cumulativeClusterWeights, alpha, assigner, neighborhoods, localAssignments);
 
                 // Update the centroids using SGD.
-                updateCentroids(sampledVectors, cumulativeClusterWeights, localAssignments, centroids, floatShadow);
+                updateCentroids(sampledVectors, cumulativeClusterWeights, localAssignments, centroids, floatCentroidsShadow);
             }
             for (int kk = 0; kk < k; kk++) {
                 cumulativeClusterWeights[kk] *= forgettingFactor;
@@ -268,12 +273,28 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
         assign(vectors, i -> i, centroids, centroidChangedSlices, assignments, neighborhoods);
 
         int[] centroidCounts = new int[centroids.length];
-        CentroidAssignment.updateCentroids(vectors, ops, centroids, i -> i, centroidChangedSlices, centroidCounts, assignments);
+        int[][] byteAccumulators = (ops instanceof CentroidOps.ByteOps) ? new int[centroids.length][vectors.dimension()] : null;
+        CentroidAssignment.updateCentroids(
+            vectors,
+            ops,
+            centroids,
+            i -> i,
+            centroidChangedSlices,
+            centroidCounts,
+            assignments,
+            byteAccumulators
+        );
     }
 
     /**
      * helper that calls {@link BalancedASKMeansLocal#cluster(ClusteringVectorValues, KMeansIntermediate)} given a set of initialized
      * centroids, this call is not neighbor aware
+     *
+     * @param vectors the vectors to cluster
+     * @param ops the type of vectors such as float and associated operations
+     * @param centroids the initialized centroids to be shifted using k-means
+     * @param sampleSize the subset of vectors to use when shifting centroids
+     * @param maxIterations the max iterations to shift centroids
      */
     public static <V> void cluster(ClusteringVectorValues<V> vectors, CentroidOps<V> ops, V[] centroids, int sampleSize, int maxIterations)
         throws IOException {
