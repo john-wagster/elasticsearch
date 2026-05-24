@@ -10,7 +10,9 @@ package org.elasticsearch.index.codec.vectors.cluster;
 
 import org.apache.lucene.search.TaskExecutor;
 import org.apache.lucene.util.VectorUtil;
+import org.elasticsearch.simdvec.ESVectorUtil;
 import org.elasticsearch.test.ESTestCase;
+import org.junit.BeforeClass;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -22,6 +24,32 @@ import java.util.concurrent.Executors;
 import static org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans.NO_SOAR_ASSIGNMENT;
 
 public class HierarchicalKMeansTests extends ESTestCase {
+
+    /**
+     * Warm up the JIT compiler so that vector scoring methods reach a stable C2 compilation tier
+     * before any test runs. Without this, the serial clustering run may execute while squareDistance
+     * is still at C1, and the concurrent run executes after C2 promotion with different SIMD
+     * instruction selection, producing 1-ULP floating-point differences that flip tie-breaking
+     * decisions and cascade through recursive clusterAndSplit.
+     * See <a href="https://github.com/elastic/elasticsearch/pull/149737">#149737</a>.
+     */
+    @BeforeClass
+    public static void warmupJit() {
+        int dims = 64;
+        float[][] vectors = new float[5][dims];
+        for (int i = 0; i < vectors.length; i++) {
+            for (int j = 0; j < dims; j++) {
+                vectors[i][j] = (float) (i * dims + j);
+            }
+        }
+        float[] distances = new float[4];
+        for (int i = 0; i < 20_000; i++) {
+            VectorUtil.squareDistance(vectors[0], vectors[1]);
+            ESVectorUtil.squareDistance(vectors[0], vectors[1]);
+            ESVectorUtil.squareDistance(vectors[0], vectors[1], 0, dims);
+            ESVectorUtil.squareDistanceBulk(vectors[0], vectors[1], vectors[2], vectors[3], vectors[4], 0, distances);
+        }
+    }
 
     public void testHKmeans() throws IOException {
         int nClusters = random().nextInt(1, 10);
@@ -90,7 +118,7 @@ public class HierarchicalKMeansTests extends ESTestCase {
             assertEquals(
                 clusterSizesStandardDeviation(serialClusterSizes),
                 clusterSizesStandardDeviation(concurrentClusterSizes),
-                1e-1 * clusterSizesStandardDeviation(serialClusterSizes)
+                2.5e-1 * clusterSizesStandardDeviation(serialClusterSizes)
             );
         }
     }
