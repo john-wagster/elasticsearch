@@ -31,20 +31,10 @@ public class KMeansResult<V> {
             return null;
         }
     };
-    private static final KMeansResult<byte[]> BYTE_EMPTY = new KMeansResult<>(new byte[0][], new int[0], new int[0]) {
-        @Override
-        public byte[] getCentroid(int vectorOrdinal) {
-            return null;
-        }
-    };
 
     @SuppressWarnings("unchecked")
     public static <V> KMeansResult<V> empty(CentroidOps<V> ops) {
-        if (ops instanceof CentroidOps.FloatOps) {
-            return (KMeansResult<V>) FLOAT_EMPTY;
-        } else {
-            return (KMeansResult<V>) BYTE_EMPTY;
-        }
+        return (KMeansResult<V>) FLOAT_EMPTY;
     }
 
     /**
@@ -146,12 +136,5 @@ public class KMeansResult<V> {
             assignmentOffset += resultAssignments.length;
         }
         return new KMeansResult<>(centroids, assignments, spillAssignments);
-    }
-
-    /**
-     * Float-only convenience overload for backward compatibility with callers that don't have a {@link CentroidOps}.
-     */
-    public static KMeansResult<float[]> merge(List<KMeansResult<float[]>> results) {
-        return merge(results, CentroidOps.FLOAT);
     }
 }

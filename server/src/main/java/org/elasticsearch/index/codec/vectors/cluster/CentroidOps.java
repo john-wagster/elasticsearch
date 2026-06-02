@@ -15,12 +15,11 @@ import org.elasticsearch.simdvec.MathUtils;
 /**
  * Encapsulates all vector/centroid-type-specific arithmetic for k-means clustering.
  * <p>
- * Two implementations are provided: {@link FloatOps} for {@code float[]} vectors/centroids
- * and {@link ByteOps} for {@code byte[]} vectors/centroids.
+ * Currently provides {@link FloatOps} for {@code float[]} vectors/centroids.
  *
- * @param <V> the array type for vectors and centroids ({@code float[]} or {@code byte[]})
+ * @param <V> the array type for vectors and centroids ({@code float[]})
  */
-public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps.ByteOps {
+public sealed interface CentroidOps<V> permits CentroidOps.FloatOps {
 
     // ---- Distance operations ----
 
@@ -96,7 +95,7 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
 
     /**
      * Convert centroids to {@code float[][]} for use with float-only subsystems (e.g. {@link NeighborHood}).
-     * For {@link FloatOps} this is a no-op cast. For {@link ByteOps} this widens each byte to float.
+     * For {@link FloatOps} this is a no-op cast.
      */
     float[][] toFloatCentroids(V[] centroids);
 
@@ -110,9 +109,6 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
 
     /** Convenience constant for the float ops singleton. */
     CentroidOps<float[]> FLOAT = FloatOps.INSTANCE;
-
-    /** Convenience constant for the byte ops singleton. */
-    CentroidOps<byte[]> BYTE = ByteOps.INSTANCE;
 
     // ---- Implementations ----
 
@@ -280,143 +276,6 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
         @Override
         public float[][] toFloatCentroids(float[][] centroids) {
             return centroids;
-        }
-    }
-
-    /**
-     * {@link CentroidOps} for {@code byte[]} vectors and centroids.
-     * <p>
-     * Centroid averaging uses {@code int[]} accumulators (see {@code CentroidAssignment.updateCentroidsByte}).
-     * SGD updates use float shadow arrays (see {@code BalancedASKMeansLocal}, {@code BalancedOTKMeansLocal}).
-     */
-    final class ByteOps implements CentroidOps<byte[]> {
-
-        public static final ByteOps INSTANCE = new ByteOps();
-
-        private ByteOps() {}
-
-        @Override
-        public float squareDistance(byte[] a, byte[] b) {
-            return ESVectorUtil.squareDistance(a, b);
-        }
-
-        @Override
-        public float squareDistance(byte[] a, byte[] b, int offset, int length) {
-            return ESVectorUtil.squareDistance(a, b, offset, length);
-        }
-
-        @Override
-        public void squareDistanceBulk(byte[] query, byte[] c0, byte[] c1, byte[] c2, byte[] c3, int offset, float[] distances) {
-            ESVectorUtil.squareDistanceBulk(query, c0, c1, c2, c3, offset, distances);
-        }
-
-        @Override
-        public void squareDistanceBulk(
-            byte[] query,
-            int queryOffset,
-            int length,
-            byte[] c0,
-            byte[] c1,
-            byte[] c2,
-            byte[] c3,
-            float[] distances
-        ) {
-            ESVectorUtil.squareDistanceBulk(query, queryOffset, length, c0, c1, c2, c3, distances);
-        }
-
-        @Override
-        public float soarDistance(byte[] vector, byte[] centroid, float[] diffs, float soarLambda, float vectorCentroidDist) {
-            return ESVectorUtil.soarDistance(vector, centroid, diffs, soarLambda, vectorCentroidDist);
-        }
-
-        @Override
-        public void soarDistanceBulk(
-            byte[] vector,
-            byte[] c0,
-            byte[] c1,
-            byte[] c2,
-            byte[] c3,
-            float[] diffs,
-            float soarLambda,
-            float vectorCentroidDist,
-            float[] distances
-        ) {
-            ESVectorUtil.soarDistanceBulk(vector, c0, c1, c2, c3, diffs, soarLambda, vectorCentroidDist, distances);
-        }
-
-        @Override
-        public float dotProduct(byte[] a, byte[] b) {
-            return ESVectorUtil.dotProduct(a, b);
-        }
-
-        @Override
-        public byte[] newCentroid(int dims) {
-            return new byte[dims];
-        }
-
-        @Override
-        public byte[][] newCentroidArray(int k, int dims) {
-            return new byte[k][dims];
-        }
-
-        @Override
-        public byte[][] newCentroidArrayShallow(int k) {
-            return new byte[k][];
-        }
-
-        @Override
-        public void deepCopy(byte[][] source, byte[][] destination) {
-            for (int i = 0; i < source.length; i++) {
-                System.arraycopy(source[i], 0, destination[i], 0, source[i].length);
-            }
-        }
-
-        @Override
-        public void arrayCopy(byte[][] src, int srcPos, byte[][] dest, int destPos, int length) {
-            System.arraycopy(src, srcPos, dest, destPos, length);
-        }
-
-        @Override
-        public int length(byte[] vector) {
-            return vector.length;
-        }
-
-        @Override
-        public void initCentroid(byte[] centroid, byte[] vector, int dim) {
-            System.arraycopy(vector, 0, centroid, 0, dim);
-        }
-
-        @Override
-        public void computeDiffs(byte[] vector, byte[] centroid, float[] diffs) {
-            for (int j = 0; j < diffs.length; j++) {
-                diffs[j] = vector[j] - centroid[j];
-            }
-        }
-
-        @Override
-        public float normalizedFrobeniusNorm(byte[][] vecs1, byte[][] vecs2) {
-            assert vecs1.length == vecs2.length;
-            float result = 0;
-            float norm2 = 0;
-            for (int i = 0; i < vecs1.length; i++) {
-                result += squareDistance(vecs1[i], vecs2[i]);
-                norm2 += dotProduct(vecs2[i], vecs2[i]);
-            }
-            return MathUtils.sqrt(result / norm2);
-        }
-
-        @Override
-        public float[][] toFloatCentroids(byte[][] centroids) {
-            float[][] result = new float[centroids.length][];
-            for (int i = 0; i < centroids.length; i++) {
-                byte[] src = centroids[i];
-                float[] dst = new float[src.length];
-                for (int j = 0; j < src.length; j++) {
-                    dst[j] = src[j];
-                }
-                result[i] = dst;
-            }
-            return result;
         }
     }
 }

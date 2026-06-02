@@ -82,7 +82,6 @@ abstract class LloydKMeansLocal<V> extends KMeansLocal<V> {
             centroidChangedSlices[i] = new FixedBitSet(centroids.length);
         }
         int[] centroidCounts = new int[centroids.length];
-        int[][] byteAccumulators = (ops instanceof CentroidOps.ByteOps) ? new int[k][vectors.dimension()] : null;
         for (int i = 0; i < maxIterations; i++) {
             // This is potentially sampled, so we need to translate ordinals
             if (stepLloyd(sampledVectors, ordTranslator, centroids, centroidChangedSlices, assignments, neighborhoods)) {
@@ -93,8 +92,7 @@ abstract class LloydKMeansLocal<V> extends KMeansLocal<V> {
                     ordTranslator,
                     centroidChangedSlices,
                     centroidCounts,
-                    assignments,
-                    byteAccumulators
+                    assignments
                 );
             } else {
                 break;
@@ -111,8 +109,7 @@ abstract class LloydKMeansLocal<V> extends KMeansLocal<V> {
                     ordTranslator,
                     centroidChangedSlices,
                     centroidCounts,
-                    assignments,
-                    byteAccumulators
+                    assignments
                 );
             }
         }
@@ -121,6 +118,12 @@ abstract class LloydKMeansLocal<V> extends KMeansLocal<V> {
     /**
      * helper that calls {@link LloydKMeansLocal#cluster(ClusteringVectorValues, KMeansIntermediate)} given a set of initialized
      * centroids, this call is not neighbor aware
+     *
+     * @param vectors the vectors to cluster
+     * @param ops the type of vectors such as float and associated operations
+     * @param centroids the initialized centroids to be shifted using k-means
+     * @param sampleSize the subset of vectors to use when shifting centroids
+     * @param maxIterations the max iterations to shift centroids
      */
     public static <V> void cluster(ClusteringVectorValues<V> vectors, CentroidOps<V> ops, V[] centroids, int sampleSize, int maxIterations)
         throws IOException {

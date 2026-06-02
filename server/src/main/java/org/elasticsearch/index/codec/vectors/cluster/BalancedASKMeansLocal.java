@@ -122,42 +122,20 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
     }
 
     /** update the centroids using stochastic gradient descent */
-    protected void updateCentroids(
-        ClusteringVectorValues<V> vectors,
-        float[] cumulativeClusterWeights,
-        int[] assignments,
-        V[] centroids,
-        float[][] floatCentroidsShadow
-    ) throws IOException {
+    protected void updateCentroids(ClusteringVectorValues<V> vectors, float[] cumulativeClusterWeights, int[] assignments, V[] centroids)
+        throws IOException {
         // The SGD learning rate is computed as 1 / (clusterCount + learningRateShift).
         // Using a shift so that the updates are gentle and small.
         float learningRateShift = 3.f * this.sampleSize / centroids.length;
 
-        if (floatCentroidsShadow != null) {
-            // Byte path: SGD in float precision, round to byte for distance computation
-            int dim = vectors.dimension();
-            for (int idx = 0; idx < vectors.size(); idx++) {
-                byte[] vec = (byte[]) vectors.vectorValue(idx);
-                int k = assignments[idx];
-                cumulativeClusterWeights[k]++;
-                float lr = 1.f / (cumulativeClusterWeights[k] + learningRateShift);
-                ESVectorUtil.linearCombination(lr, vec, 1 - lr, floatCentroidsShadow[k]);
-                // Round back to byte centroid for distance computation
-                byte[] byteCentroid = (byte[]) centroids[k];
-                for (int d = 0; d < dim; d++) {
-                    byteCentroid[d] = (byte) Math.clamp(Math.round(floatCentroidsShadow[k][d]), -128, 127);
-                }
-            }
-        } else {
-            // Float path
-            CentroidOps.FloatOps floatOps = (CentroidOps.FloatOps) ops;
-            for (int idx = 0; idx < vectors.size(); idx++) {
-                V vec = vectors.vectorValue(idx);
-                int k = assignments[idx];
-                cumulativeClusterWeights[k]++;
-                float learningRate = 1.f / (cumulativeClusterWeights[k] + learningRateShift);
-                floatOps.linearCombination(learningRate, (float[]) vec, 1 - learningRate, (float[]) centroids[k]);
-            }
+        // Float path
+        CentroidOps.FloatOps floatOps = (CentroidOps.FloatOps) ops;
+        for (int idx = 0; idx < vectors.size(); idx++) {
+            V vec = vectors.vectorValue(idx);
+            int k = assignments[idx];
+            cumulativeClusterWeights[k]++;
+            float learningRate = 1.f / (cumulativeClusterWeights[k] + learningRateShift);
+            floatOps.linearCombination(learningRate, (float[]) vec, 1 - learningRate, (float[]) centroids[k]);
         }
     }
 
@@ -210,12 +188,6 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
 
         OnlineQuantileEstimator medianEstimator = null; // We cannot initialize the estimator now because we need to know its range.
 
-        // For byte centroids, maintain float shadow to avoid rounding noise during SGD
-        float[][] floatCentroidsShadow = null;
-        if (ops instanceof CentroidOps.ByteOps) {
-            floatCentroidsShadow = ops.toFloatCentroids(centroids);
-        }
-
         int t = 0;
         for (int epoch = 0; epoch < maxIterations; epoch++) {
             for (int batch = 0; batch < sampleSize; batch += miniBatchSizeLocal) {
@@ -257,7 +229,7 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
                 assignMiniBatch(distances, cumulativeClusterWeights, alpha, assigner, neighborhoods, localAssignments);
 
                 // Update the centroids using SGD.
-                updateCentroids(sampledVectors, cumulativeClusterWeights, localAssignments, centroids, floatCentroidsShadow);
+                updateCentroids(sampledVectors, cumulativeClusterWeights, localAssignments, centroids);
             }
             for (int kk = 0; kk < k; kk++) {
                 cumulativeClusterWeights[kk] *= forgettingFactor;
@@ -273,17 +245,7 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
         assign(vectors, i -> i, centroids, centroidChangedSlices, assignments, neighborhoods);
 
         int[] centroidCounts = new int[centroids.length];
-        int[][] byteAccumulators = (ops instanceof CentroidOps.ByteOps) ? new int[centroids.length][vectors.dimension()] : null;
-        CentroidAssignment.updateCentroids(
-            vectors,
-            ops,
-            centroids,
-            i -> i,
-            centroidChangedSlices,
-            centroidCounts,
-            assignments,
-            byteAccumulators
-        );
+        CentroidAssignment.updateCentroids(vectors, ops, centroids, i -> i, centroidChangedSlices, centroidCounts, assignments);
     }
 
     /**

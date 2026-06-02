@@ -121,13 +121,6 @@ public final class CentroidAssignment {
 
     /**
      * Recompute centroid positions as the mean of their assigned vectors.
-     * <p>
-     * For float centroids, this accumulates directly into the centroid arrays.
-     * For byte centroids, this uses int[] accumulators and rounds back to byte.
-     *
-     * @param byteAccumulators pre-allocated {@code int[k][dim]} array for byte centroid accumulation,
-     *                         or {@code null} for float centroids. Reusing this across iterations avoids
-     *                         repeated allocation in the inner loop.
      */
     static <V> void updateCentroids(
         ClusteringVectorValues<V> vectors,
@@ -136,8 +129,7 @@ public final class CentroidAssignment {
         IntToIntFunction ordTranslator,
         FixedBitSet[] centroidChangedSlices,
         int[] centroidCounts,
-        int[] assignments,
-        int[][] byteAccumulators
+        int[] assignments
     ) throws IOException {
         Arrays.fill(centroidCounts, 0);
         FixedBitSet centroidChanged = centroidChangedSlices[0];
@@ -146,33 +138,16 @@ public final class CentroidAssignment {
         }
         int dim = vectors.dimension();
 
-        if (ops instanceof CentroidOps.ByteOps) {
-            // For byte centroids, we need int[] accumulators to avoid overflow
-            @SuppressWarnings("unchecked")
-            ClusteringVectorValues<byte[]> byteVectors = (ClusteringVectorValues<byte[]>) (ClusteringVectorValues<?>) vectors;
-            updateCentroidsByte(
-                byteVectors,
-                (CentroidOps.ByteOps) ops,
-                (byte[][]) centroids,
-                centroidChanged,
-                centroidCounts,
-                ordTranslator,
-                assignments,
-                dim,
-                byteAccumulators
-            );
-        } else {
-            updateCentroidsFloat(
-                vectors,
-                (CentroidOps.FloatOps) ops,
-                centroids,
-                centroidChanged,
-                centroidCounts,
-                ordTranslator,
-                assignments,
-                dim
-            );
-        }
+        updateCentroidsFloat(
+            vectors,
+            (CentroidOps.FloatOps) ops,
+            centroids,
+            centroidChanged,
+            centroidCounts,
+            ordTranslator,
+            assignments,
+            dim
+        );
     }
 
     private static <V> void updateCentroidsFloat(
@@ -203,49 +178,6 @@ public final class CentroidAssignment {
                 float count = (float) centroidCounts[clusterIdx];
                 if (count > 0) {
                     ops.divide((float[]) centroids[clusterIdx], count, dim);
-                }
-            }
-        }
-    }
-
-    private static void updateCentroidsByte(
-        ClusteringVectorValues<byte[]> vectors,
-        CentroidOps.ByteOps ops,
-        byte[][] centroids,
-        FixedBitSet centroidChanged,
-        int[] centroidCounts,
-        IntToIntFunction ordTranslator,
-        int[] assignments,
-        int dim,
-        int[][] accumulators
-    ) throws IOException {
-        // Zero only the rows for changed centroids
-        for (int i = 0; i < centroids.length; i++) {
-            if (centroidChanged.get(i)) {
-                Arrays.fill(accumulators[i], 0);
-            }
-        }
-
-        for (int idx = 0; idx < vectors.size(); idx++) {
-            final int assignment = assignments[ordTranslator.apply(idx)];
-            if (centroidChanged.get(assignment)) {
-                byte[] vector = vectors.vectorValue(idx);
-                centroidCounts[assignment]++;
-                int[] acc = accumulators[assignment];
-                for (int d = 0; d < dim; d++) {
-                    acc[d] += vector[d];
-                }
-            }
-        }
-
-        for (int clusterIdx = 0; clusterIdx < centroids.length; clusterIdx++) {
-            if (centroidChanged.get(clusterIdx) && centroidCounts[clusterIdx] > 0) {
-                int count = centroidCounts[clusterIdx];
-                int[] acc = accumulators[clusterIdx];
-                byte[] centroid = centroids[clusterIdx];
-                for (int d = 0; d < dim; d++) {
-                    // Round the average and clamp to byte range
-                    centroid[d] = (byte) Math.clamp(Math.round((float) acc[d] / count), -128, 127);
                 }
             }
         }

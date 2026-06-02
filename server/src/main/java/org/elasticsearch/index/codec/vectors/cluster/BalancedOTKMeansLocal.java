@@ -11,7 +11,6 @@ package org.elasticsearch.index.codec.vectors.cluster;
 
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.hnsw.IntToIntFunction;
-import org.elasticsearch.simdvec.ESVectorUtil;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -64,71 +63,46 @@ abstract class BalancedOTKMeansLocal<V> extends KMeansLocal<V> {
         ClusteringVectorValues<V> vectors,
         float[] cumulativeClusterWeights,
         float[][] softAssignments,
-        V[] centroids,
-        float[][] floatCentroidsShadow
+        V[] centroids
     ) throws IOException {
         int k = centroids.length;
         int dim = vectors.dimension();
 
-        if (floatCentroidsShadow != null) {
-            // Byte path: accumulate in float precision, update float shadow, copy back to byte
-            float[][] batchSums = new float[k][dim];
-            float[] batchWeights = new float[k];
+        // Float path
+        CentroidOps.FloatOps floatOps = (CentroidOps.FloatOps) ops;
+        V[] batchCentroidSums = ops.newCentroidArray(k, dim);
+        float[] batchWeights = new float[k];
 
-            for (int idx = 0; idx < vectors.size(); idx++) {
-                byte[] vec = (byte[]) vectors.vectorValue(idx);
-                for (int c = 0; c < k; c++) {
-                    float weight = softAssignments[idx][c];
-                    if (weight > 1e-7f) {
-                        batchWeights[c] += weight;
-                        ESVectorUtil.linearCombination(weight, vec, 1.0f, batchSums[c]);
-                    }
-                }
-            }
-
+        // Accumulate the raw Sinkhorn weights via fast FMA loop
+        for (int idx = 0; idx < vectors.size(); idx++) {
+            V vec = vectors.vectorValue(idx);
             for (int c = 0; c < k; c++) {
-                if (batchWeights[c] > 0) {
-                    float scaledBatchWeight = batchWeights[c] * k;
-                    cumulativeClusterWeights[c] += scaledBatchWeight;
-                    float learningRate = scaledBatchWeight / cumulativeClusterWeights[c];
-                    float lrNorm = learningRate / batchWeights[c];
-                    ESVectorUtil.linearCombination(lrNorm, batchSums[c], 1.0f - learningRate, floatCentroidsShadow[c]);
-                    // Round back to byte centroids for distance computation
-                    byte[] byteCentroid = (byte[]) centroids[c];
-                    for (int d = 0; d < dim; d++) {
-                        byteCentroid[d] = (byte) Math.clamp(Math.round(floatCentroidsShadow[c][d]), -128, 127);
-                    }
+                float weight = softAssignments[idx][c];
+                if (weight > 1e-7f) {
+                    batchWeights[c] += weight;
+                    floatOps.linearCombination(weight, (float[]) vec, (float[]) batchCentroidSums[c]);
                 }
             }
-        } else {
-            // Float path
-            CentroidOps.FloatOps floatOps = (CentroidOps.FloatOps) ops;
-            V[] batchCentroidSums = ops.newCentroidArray(k, dim);
-            float[] batchWeights = new float[k];
+        }
 
-            for (int idx = 0; idx < vectors.size(); idx++) {
-                V vec = vectors.vectorValue(idx);
-                for (int c = 0; c < k; c++) {
-                    float weight = softAssignments[idx][c];
-                    if (weight > 1e-7f) {
-                        batchWeights[c] += weight;
-                        floatOps.linearCombination(weight, (float[]) vec, (float[]) batchCentroidSums[c]);
-                    }
-                }
-            }
+        // Apply the k scaling and update
+        for (int c = 0; c < k; c++) {
+            if (batchWeights[c] > 0) {
+                // Apply empirical k scaling to the weights to drive the learning rate.
+                float scaledBatchWeight = batchWeights[c] * k;
 
-            for (int c = 0; c < k; c++) {
-                if (batchWeights[c] > 0) {
-                    float scaledBatchWeight = batchWeights[c] * k;
-                    cumulativeClusterWeights[c] += scaledBatchWeight;
-                    float learningRate = scaledBatchWeight / cumulativeClusterWeights[c];
-                    floatOps.linearCombination(
-                        learningRate / batchWeights[c],
-                        (float[]) batchCentroidSums[c],
-                        1.0f - learningRate,
-                        (float[]) centroids[c]
-                    );
-                }
+                // Because scaledBatchWeight is added to the denominator we're good.
+                cumulativeClusterWeights[c] += scaledBatchWeight;
+                float learningRate = scaledBatchWeight / cumulativeClusterWeights[c];
+
+                // In the first argument, we divide the learning rate by batchWeights[c],
+                // which is equivalent to normalizing batchCentroidSums[c] from a sum to a mean
+                floatOps.linearCombination(
+                    learningRate / batchWeights[c],
+                    (float[]) batchCentroidSums[c],
+                    1.0f - learningRate,
+                    (float[]) centroids[c]
+                );
             }
         }
     }
@@ -180,12 +154,6 @@ abstract class BalancedOTKMeansLocal<V> extends KMeansLocal<V> {
         V[] oldCentroids = ops.newCentroidArray(k, vectors.dimension());
         ops.deepCopy(centroids, oldCentroids);
 
-        // For byte centroids, maintain float shadow to avoid rounding noise during SGD
-        float[][] floatCentroidsShadow = null;
-        if (ops instanceof CentroidOps.ByteOps) {
-            floatCentroidsShadow = ops.toFloatCentroids(centroids);
-        }
-
         int t = 0;
         for (int epoch = 0; epoch < maxIterations; epoch++) {
             for (int batch = 0; batch < sampleSize; batch += miniBatchSizeLocal) {
@@ -223,7 +191,7 @@ abstract class BalancedOTKMeansLocal<V> extends KMeansLocal<V> {
                 sinkhorn.compute(distances, sinkhornIterations, eps, softAssignments);
 
                 // Update the centroids using SGD.
-                updateCentroids(sampledVectors, cumulativeClusterWeights, softAssignments, centroids, floatCentroidsShadow);
+                updateCentroids(sampledVectors, cumulativeClusterWeights, softAssignments, centroids);
             }
             eta *= etaMultiplicativeUpdate;
             for (int kk = 0; kk < k; kk++) {
@@ -245,17 +213,7 @@ abstract class BalancedOTKMeansLocal<V> extends KMeansLocal<V> {
 
         assign(vectors, i -> i, centroids, centroidChangedSlices, assignments, neighborhoods);
         int[] centroidCounts = new int[centroids.length];
-        int[][] byteAccumulators = (ops instanceof CentroidOps.ByteOps) ? new int[centroids.length][vectors.dimension()] : null;
-        CentroidAssignment.updateCentroids(
-            vectors,
-            ops,
-            centroids,
-            i -> i,
-            centroidChangedSlices,
-            centroidCounts,
-            assignments,
-            byteAccumulators
-        );
+        CentroidAssignment.updateCentroids(vectors, ops, centroids, i -> i, centroidChangedSlices, centroidCounts, assignments);
     }
 
     /**

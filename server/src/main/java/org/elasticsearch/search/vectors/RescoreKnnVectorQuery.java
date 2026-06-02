@@ -28,14 +28,13 @@ import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.VectorScorer;
+import org.apache.lucene.store.IndexInput;
 import org.elasticsearch.common.lucene.search.Queries;
-import org.elasticsearch.core.CheckedRunnable;
 import org.elasticsearch.search.profile.query.QueryProfiler;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Objects;
 
@@ -304,7 +303,12 @@ public abstract class RescoreKnnVectorQuery extends Query implements QueryProfil
 
             final int targetDimension = target.dimension();
             List<ScoreDoc> results = new ArrayList<>(10);
-            List<CheckedRunnable<IOException>> buffer = new LinkedList<>();
+            int[] ringDocIDs = new int[PREFETCH_BUFFER_SIZE];
+            int[] ringDocBases = new int[PREFETCH_BUFFER_SIZE];
+            VectorScorer[] ringScorers = new VectorScorer[PREFETCH_BUFFER_SIZE];
+            int ringHead = 0;
+            int ringCount = 0;
+
             for (var leaf : indexSearcher.getIndexReader().leaves()) {
                 var fieldInfo = leaf.reader().getFieldInfos().fieldInfo(fieldName);
                 if (fieldInfo == null) {
@@ -330,16 +334,55 @@ public abstract class RescoreKnnVectorQuery extends Query implements QueryProfil
                     continue;
                 }
                 var filterIterator = scorer.iterator();
-                rescoreIndividually(leaf.docBase, knnVectorValues, buffer, results, filterIterator);
+
+                final int vectorByteSize = knnVectorValues.getVectorByteLength();
+                final IndexInput input = getIndexSliceOrNull(knnVectorValues);
+                KnnVectorValues.DocIndexIterator vectorIter = knnVectorValues.iterator();
+                DocIdSetIterator conjunction = ConjunctionUtils.intersectIterators(List.of(vectorIter, filterIterator));
+                VectorScorer vecScorer = knnVectorValues.rescorer(floatTarget);
+                int doc;
+                while ((doc = conjunction.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+                    assert doc == vectorIter.docID();
+                    final int ord = vectorIter.index();
+
+                    if (input != null) {
+                        input.prefetch((long) ord * vectorByteSize, vectorByteSize);
+                    }
+
+                    if (ringCount == PREFETCH_BUFFER_SIZE) {
+                        scoreEntry(ringDocIDs[ringHead], ringDocBases[ringHead], ringScorers[ringHead], results);
+                        ringHead = (ringHead + 1) % PREFETCH_BUFFER_SIZE;
+                        ringCount--;
+                    }
+
+                    int ringTail = (ringHead + ringCount) % PREFETCH_BUFFER_SIZE;
+                    ringDocIDs[ringTail] = doc;
+                    ringDocBases[ringTail] = leaf.docBase;
+                    ringScorers[ringTail] = vecScorer;
+                    ringCount++;
+                }
             }
 
-            for (var runnable : buffer) {
-                runnable.run();
+            for (int i = 0; i < ringCount; i++) {
+                int idx = (ringHead + i) % PREFETCH_BUFFER_SIZE;
+                scoreEntry(ringDocIDs[idx], ringDocBases[idx], ringScorers[idx], results);
             }
-            buffer.clear();
-            // Remove any remaining sentinel values
+
             ScoreDoc[] arrayResults = results.toArray(new ScoreDoc[0]);
             return new KnnScoreDocQuery(arrayResults, indexSearcher.getIndexReader());
+        }
+
+        private static IndexInput getIndexSliceOrNull(KnnVectorValues vectorValues) {
+            return vectorValues instanceof HasIndexSlice h ? h.getSlice() : null;
+        }
+
+        private static void scoreEntry(int docID, int docBase, VectorScorer scorer, List<ScoreDoc> results) throws IOException {
+            int target = scorer.iterator().advance(docID);
+            assert target == docID;
+            float score = scorer.score();
+            if (Float.isNaN(score) == false) {
+                results.add(new ScoreDoc(docID + docBase, score));
+            }
         }
 
         @Override
