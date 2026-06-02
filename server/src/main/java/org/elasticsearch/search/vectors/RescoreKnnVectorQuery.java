@@ -30,6 +30,7 @@ import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.VectorScorer;
 import org.apache.lucene.store.IndexInput;
 import org.elasticsearch.common.lucene.search.Queries;
+import org.elasticsearch.core.CheckedRunnable;
 import org.elasticsearch.search.profile.query.QueryProfiler;
 
 import java.io.IOException;
@@ -339,7 +340,10 @@ public abstract class RescoreKnnVectorQuery extends Query implements QueryProfil
                 final IndexInput input = getIndexSliceOrNull(knnVectorValues);
                 KnnVectorValues.DocIndexIterator vectorIter = knnVectorValues.iterator();
                 DocIdSetIterator conjunction = ConjunctionUtils.intersectIterators(List.of(vectorIter, filterIterator));
-                VectorScorer vecScorer = knnVectorValues.rescorer(floatTarget);
+                VectorScorer vecScorer = switch (target) {
+                    case VectorQueryTarget.ByteTarget bt -> ((ByteVectorValues) knnVectorValues).rescorer(bt.vector());
+                    case VectorQueryTarget.FloatTarget ft -> ((FloatVectorValues) knnVectorValues).rescorer(ft.vector());
+                };
                 int doc;
                 while ((doc = conjunction.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
                     assert doc == vectorIter.docID();

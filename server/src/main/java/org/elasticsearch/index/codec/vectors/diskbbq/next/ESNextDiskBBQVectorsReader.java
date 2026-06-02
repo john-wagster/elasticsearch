@@ -10,6 +10,7 @@
 package org.elasticsearch.index.codec.vectors.diskbbq.next;
 
 import org.apache.lucene.index.FieldInfo;
+import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.VectorEncoding;
@@ -26,6 +27,7 @@ import org.apache.lucene.util.packed.DirectReader;
 import org.apache.lucene.util.packed.DirectWriter;
 import org.elasticsearch.index.codec.vectors.GenericFlatVectorReaders;
 import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
+import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.NeighborQueue;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIterator;
 import org.elasticsearch.index.codec.vectors.diskbbq.DocIdsWriter;
@@ -74,6 +76,14 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             ESNextDiskBBQVectorsFormat.VERSION_DIRECT_IO,
             ESNextDiskBBQVectorsFormat.DYNAMIC_VISIT_RATIO
         );
+    }
+
+    @Override
+    public CentroidData readCentroidData(FieldInfo fieldInfo) throws IOException {
+        // TODO: the PoC branch has a different centroid file layout (byte centroids, slices)
+        // that is incompatible with main's readCentroidData offset calculations.
+        // Implement once the on-disk format is finalized.
+        return null;
     }
 
     CentroidIterator getPostingListPrefetchIterator(CentroidIterator centroidIterator, IndexInput postingListSlice) throws IOException {

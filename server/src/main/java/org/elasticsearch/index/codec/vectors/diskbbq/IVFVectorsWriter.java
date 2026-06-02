@@ -34,6 +34,7 @@ import org.apache.lucene.util.LongValues;
 import org.elasticsearch.core.IOUtils;
 import org.elasticsearch.core.SuppressForbidden;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringByteVectorValues;
+import org.elasticsearch.index.codec.vectors.cluster.KMeansByteVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.IvfSegmentConfig;
 import org.elasticsearch.simdvec.ESVectorUtil;
@@ -563,7 +564,7 @@ public abstract class IVFVectorsWriter extends KnnVectorsWriter {
     ) throws IOException {
         List<byte[]> byteVectors = fieldVectorsWriter.getVectors();
         if (byteVectors.size() == maxDoc && sortMap == null) {
-            return ClusteringByteVectorValues.build(byteVectors, null, fieldInfo.getVectorDimension());
+            return KMeansByteVectorValues.build(byteVectors, null, fieldInfo.getVectorDimension());
         } else if (sortMap == null) {
             final DocIdSetIterator iterator = fieldVectorsWriter.getDocsWithFieldSet().iterator();
             final int[] docIds = new int[byteVectors.size()];
@@ -571,7 +572,7 @@ public abstract class IVFVectorsWriter extends KnnVectorsWriter {
                 docIds[i] = iterator.nextDoc();
             }
             assert iterator.nextDoc() == NO_MORE_DOCS;
-            return ClusteringByteVectorValues.build(byteVectors, docIds, fieldInfo.getVectorDimension());
+            return KMeansByteVectorValues.build(byteVectors, docIds, fieldInfo.getVectorDimension());
         } else {
             DocsWithFieldSet newDocsWithField = new DocsWithFieldSet();
             final int[] ordMap = new int[fieldVectorsWriter.getDocsWithFieldSet().cardinality()];
@@ -593,7 +594,7 @@ public abstract class IVFVectorsWriter extends KnnVectorsWriter {
                     return byteVectors.get(ordMap[index]);
                 }
             };
-            return ClusteringByteVectorValues.build(orderedVectors, docIds, fieldInfo.getVectorDimension());
+            return KMeansByteVectorValues.build(orderedVectors, docIds, fieldInfo.getVectorDimension());
         }
     }
 
@@ -880,7 +881,7 @@ public abstract class IVFVectorsWriter extends KnnVectorsWriter {
                     && supportsByteVectorClustering()
                     && fieldInfo.getVectorSimilarityFunction() != VectorSimilarityFunction.COSINE) {
                     // Byte path: cluster with ClusteringByteVectorValues, write byte centroids to temp file
-                    ClusteringByteVectorValues byteClusterValues = ClusteringByteVectorValues.build(
+                    ClusteringByteVectorValues byteClusterValues = KMeansByteVectorValues.build(
                         vectors,
                         docs,
                         numVectors,
