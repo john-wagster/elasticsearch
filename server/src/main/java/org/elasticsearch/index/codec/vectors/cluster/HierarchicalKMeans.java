@@ -146,15 +146,7 @@ public class HierarchicalKMeans<V> {
 
         // if we have a small number of vectors calculate the centroid directly
         if (vectors.size() <= targetSize) {
-            CentroidOps.FloatOps floatOps = (CentroidOps.FloatOps) ops;
-            float[] centroidF = floatOps.newCentroid(dimension);
-            for (int i = 0; i < vectors.size(); i++) {
-                float[] vector = (float[]) vectors.vectorValue(i);
-                floatOps.accumulate(centroidF, vector, dimension);
-            }
-            floatOps.divide(centroidF, vectors.size(), dimension);
-            @SuppressWarnings("unchecked")
-            V centroid = (V) centroidF;
+            V centroid = ops.computeMeanCentroid(vectors, dimension);
             V[] centroids = ops.newCentroidArrayShallow(1);
             centroids[0] = centroid;
             return new KMeansIntermediate<>(centroids, new int[vectors.size()]);
