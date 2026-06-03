@@ -624,6 +624,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             postingsOutput,
             fileOffset,
             assignments,
+            overspillAssignments,
             segmentConfig
         );
         this.ashProjectionMatrix = ashWriter.getAshProjectionMatrix();

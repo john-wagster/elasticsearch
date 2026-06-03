@@ -15,6 +15,7 @@ import org.apache.lucene.store.ByteBuffersIndexOutput;
 import org.elasticsearch.test.ESTestCase;
 
 import java.util.Random;
+import java.util.function.IntFunction;
 
 /**
  * Tests for the core ASH algorithm components: SVD, quantizers, and the full pipeline.
@@ -127,6 +128,8 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
         }
         int[] assignments = new int[nVectors]; // all zero
 
+        IntFunction<float[]> centroidGetter = (i) -> centroids[i];
+
         AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(
             projectedDimsFraction,
             bitsPerDim,
@@ -136,14 +139,14 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
             42L
         );
 
-        float[][] w = quantizer.train(vectors, centroids, assignments);
+        float[][] w = quantizer.train(vectors, centroidGetter, assignments);
         assertNotNull(w);
         assertEquals(dim, w.length);
 
         int expectedNDims = (int) (dim * projectedDimsFraction);
         assertEquals(expectedNDims, w[0].length);
 
-        AsymmetricHashingResult result = quantizer.encode(vectors, centroids, assignments, w);
+        AsymmetricHashingResult result = quantizer.encode(vectors, centroidGetter, assignments, w);
         assertEquals(nVectors, result.encodedVectors().length);
         assertEquals(nVectors, result.scales().length);
         assertEquals(nVectors, result.offsets().length);
@@ -174,6 +177,9 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
         }
         int[] assignments = new int[nVectors];
 
+        IntFunction<float[]> centroidGetter = (i) -> centroids[i];
+
+
         AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(
             projectedDimsFraction,
             bitsPerDim,
@@ -183,8 +189,8 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
             42L
         );
 
-        float[][] w = quantizer.train(vectors, centroids, assignments);
-        AsymmetricHashingResult result = quantizer.encode(vectors, centroids, assignments, w);
+        float[][] w = quantizer.train(vectors, centroidGetter, assignments);
+        AsymmetricHashingResult result = quantizer.encode(vectors, centroidGetter, assignments, w);
 
         // Score a query against the encoded vectors
         float[] query = new float[dim];
@@ -251,10 +257,12 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
         float[][] centroids = { new float[dim] };
         int[] assignments = { 0, 0 };
 
+        IntFunction<float[]> centroidGetter = (i) -> centroids[i];
+
         AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(0.25f, 1, AsymmetricHashingQuantizer.Method.LEARNED, 5, 10, 42L);
 
         // Should not throw — falls back to random
-        float[][] w = quantizer.train(vectors, centroids, assignments);
+        float[][] w = quantizer.train(vectors, centroidGetter, assignments);
         assertNotNull(w);
         assertEquals(dim, w.length);
     }

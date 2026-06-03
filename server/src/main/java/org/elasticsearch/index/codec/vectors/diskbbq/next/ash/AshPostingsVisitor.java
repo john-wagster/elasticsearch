@@ -47,12 +47,12 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
     private final int[] docIdsScratch = new int[BULK_SIZE];
     private final int[] offsetsScratch = new int[BULK_SIZE];
     private final float[] scores = new float[BULK_SIZE];
-    private final float[] centroidScratch;
 
     // Per-ASH-cluster precomputed query transforms (lazily populated)
-    private final float[][] queryTransformedByCluster;
+    private final float[] queryTransformed;
     private final float[] queryDotCentroidByCluster;
     private boolean clusterTransformsReady;
+    private float currentQueryDotCentroid;
 
     // Per-posting-list state
     private int vectors;
@@ -61,6 +61,7 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
     private long slicePos;
     private float centroidDistance;
     private final org.apache.lucene.index.VectorSimilarityFunction similarityFunction;
+    private final float[] currentCentroid;
 
     public AshPostingsVisitor(
         float[][] w,
@@ -84,40 +85,22 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         this.nDims = w[0].length;
         this.bitsPerDim = bitsPerDim;
         this.packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims, bitsPerDim);
-        this.centroidScratch = new float[fieldInfo.getVectorDimension()];
         this.similarityFunction = fieldInfo.getVectorSimilarityFunction();
+        this.currentCentroid = new float[fieldInfo.getVectorDimension()];
 
         // Pre-allocate per-ASH-cluster arrays
         int nAshClusters = ashCentroids != null ? ashCentroids.length : 0;
-        this.queryTransformedByCluster = new float[nAshClusters][nDims];
+        this.queryTransformed = new float[nDims];
         this.queryDotCentroidByCluster = new float[nAshClusters];
         this.clusterTransformsReady = false;
-    }
 
-    /**
-     * Precomputes the transformed query vector for each ASH cluster.
-     * For cluster c: queryTransformed[c] = (query - ashCentroid[c]) @ W
-     * and queryDotCentroid[c] = dot(query, ashCentroid[c]).
-     */
-    private void ensureClusterTransforms() {
-        if (clusterTransformsReady) return;
-        int originalDim = query.length;
-        for (int c = 0; c < ashCentroids.length; c++) {
-            float[] centroid = ashCentroids[c];
-            double dotQC = 0;
-            for (int d = 0; d < originalDim; d++) {
-                dotQC += (double) query[d] * centroid[d];
+        for (int j = 0; j < nDims; j++) {
+            double sum = 0;
+            for (int d = 0; d < query.length; d++) {
+                sum += (double) query[d] * w[d][j];
             }
-            queryDotCentroidByCluster[c] = (float) dotQC;
-            for (int j = 0; j < nDims; j++) {
-                double sum = 0;
-                for (int d = 0; d < originalDim; d++) {
-                    sum += (double) (query[d] - centroid[d]) * w[d][j];
-                }
-                queryTransformedByCluster[c][j] = (float) sum;
-            }
+            queryTransformed[j] = (float) sum;
         }
-        clusterTransformsReady = true;
     }
 
     @Override
@@ -125,6 +108,7 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         float score = metadata.documentCentroidScore();
         indexInput.seek(metadata.offset());
         float centroidToParentSqDist = Float.intBitsToFloat(indexInput.readInt());
+        indexInput.readFloats(currentCentroid, 0, currentCentroid.length);
         vectors = indexInput.readVInt();
         docEncoding = indexInput.readByte();
         docBase = 0;
@@ -136,10 +120,11 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
             case MAXIMUM_INNER_PRODUCT -> score - 1;
         };
 
-        // Precompute per-ASH-cluster query transforms (done once per query)
-        if (ashCentroids != null) {
-            ensureClusterTransforms();
+        double dot = 0;
+        for (int d = 0; d < query.length; d++) {
+            dot += (double) query[d] * currentCentroid[d];
         }
+        currentQueryDotCentroid = (float) dot;
 
         return vectors;
     }
@@ -163,11 +148,10 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
             float maxScore = Float.NEGATIVE_INFINITY;
             for (int j = 0; j < BULK_SIZE; j++) {
                 if (docIdsScratch[j] != -1) {
-                    int ashClusterId = indexInput.readByte() & 0xFF;
                     float scale = Float.float16ToFloat(indexInput.readShort());
                     float offset = Float.float16ToFloat(indexInput.readShort());
                     indexInput.readBytes(codeBuf, 0, packedCodeBytes);
-                    float s = scoreVector(codeBuf, scale, offset, ashClusterId);
+                    float s = scoreVector(codeBuf, scale, offset);
                     scores[j] = convertScore(s);
                     if (scores[j] > maxScore) {
                         maxScore = scores[j];
@@ -190,11 +174,10 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
                 float maxScore = Float.NEGATIVE_INFINITY;
                 for (int j = 0; j < tailSize; j++) {
                     if (docIdsScratch[j] != -1) {
-                        int ashClusterId = indexInput.readByte() & 0xFF;
                         float scale = Float.float16ToFloat(indexInput.readShort());
                         float offset = Float.float16ToFloat(indexInput.readShort());
                         indexInput.readBytes(codeBuf, 0, packedCodeBytes);
-                        float s = scoreVector(codeBuf, scale, offset, ashClusterId);
+                        float s = scoreVector(codeBuf, scale, offset);
                         scores[j] = convertScore(s);
                         if (scores[j] > maxScore) {
                             maxScore = scores[j];
@@ -223,15 +206,13 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         };
     }
 
-    private float scoreVector(byte[] codeBuf, float scale, float offset, int ashClusterId) {
-        float[] queryTransformed = queryTransformedByCluster[ashClusterId];
-        float queryDotCentroid = queryDotCentroidByCluster[ashClusterId];
+    private float scoreVector(byte[] codeBuf, float scale, float offset) {
         if (bitsPerDim == 1) {
-            return AsymmetricHashingScorer.scoreOneVectorBinary(queryTransformed, queryDotCentroid, codeBuf, nDims, scale, offset);
+            return AsymmetricHashingScorer.scoreOneVectorBinary(queryTransformed, currentQueryDotCentroid, codeBuf, nDims, scale, offset);
         } else {
             return AsymmetricHashingScorer.scoreOneVectorMultiBit(
                 queryTransformed,
-                queryDotCentroid,
+                currentQueryDotCentroid,
                 codeBuf,
                 nDims,
                 bitsPerDim,
