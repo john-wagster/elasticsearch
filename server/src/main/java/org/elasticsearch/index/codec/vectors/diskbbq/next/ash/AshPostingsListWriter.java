@@ -124,7 +124,7 @@ public class AshPostingsListWriter {
 
         IntFunction<float[]> centroidGetter = (i) -> {
             try {
-                return centroidSupplier.centroid(i);
+                return centroidSupplier.centroid(assignments[i]);
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }
@@ -133,7 +133,7 @@ public class AshPostingsListWriter {
         // Train W using primary assignments only. Each vector is later re-encoded against
         // whichever posting list's centroid it lands in (primary and/or SOAR overspill).
         long t0 = System.currentTimeMillis();
-        float[][] w = ashQuantizer.train(vectors, centroidGetter, assignments);
+        float[][] w = ashQuantizer.train(vectors, centroidGetter);
         long t1 = System.currentTimeMillis();
         logger.info("ASH train: {}ms, nDims={}", t1 - t0, w[0].length);
 

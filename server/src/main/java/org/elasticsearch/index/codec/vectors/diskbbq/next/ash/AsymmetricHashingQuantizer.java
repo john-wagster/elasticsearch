@@ -92,11 +92,10 @@ public final class AsymmetricHashingQuantizer {
      * Trains the projection matrix W on the given vectors and their cluster assignments.
      *
      * @param vectors all vectors in the segment, shape (nVectors, originalDim)
-     * @param centroids cluster centroids, fetched by ordinal
-     * @param assignments cluster assignment per vector, length nVectors
+     * @param centroids cluster centroids, fetched by vector ordinal
      * @return the learned projection matrix W, shape (originalDim, nDims)
      */
-    public float[][] train(float[][] vectors, IntFunction<float[]> centroids, int[] assignments) {
+    public float[][] train(float[][] vectors, IntFunction<float[]> centroids) {
         int originalDim = vectors[0].length;
         int nDims = nDims(originalDim);
 
@@ -117,7 +116,7 @@ public final class AsymmetricHashingQuantizer {
         float[][] xTraining = new float[trainingSize][originalDim];
         for (int i = 0; i < trainingSize; i++) {
             int srcIdx = sampleIndices[i];
-            float[] centroid = centroids.apply(assignments[srcIdx]);
+            float[] centroid = centroids.apply(srcIdx);
             double normSq = 0;
             for (int d = 0; d < originalDim; d++) {
                 xTraining[i][d] = vectors[srcIdx][d] - centroid[d];

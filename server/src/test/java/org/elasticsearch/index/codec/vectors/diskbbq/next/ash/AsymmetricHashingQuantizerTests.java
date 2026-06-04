@@ -128,7 +128,7 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
         }
         int[] assignments = new int[nVectors]; // all zero
 
-        IntFunction<float[]> centroidGetter = (i) -> centroids[i];
+        IntFunction<float[]> centroidGetter = (i) -> centroids[assignments[i]];
 
         AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(
             projectedDimsFraction,
@@ -139,7 +139,7 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
             42L
         );
 
-        float[][] w = quantizer.train(vectors, centroidGetter, assignments);
+        float[][] w = quantizer.train(vectors, centroidGetter);
         assertNotNull(w);
         assertEquals(dim, w.length);
 
@@ -177,7 +177,7 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
         }
         int[] assignments = new int[nVectors];
 
-        IntFunction<float[]> centroidGetter = (i) -> centroids[i];
+        IntFunction<float[]> centroidGetter = (i) -> centroids[assignments[i]];
 
 
         AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(
@@ -189,7 +189,7 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
             42L
         );
 
-        float[][] w = quantizer.train(vectors, centroidGetter, assignments);
+        float[][] w = quantizer.train(vectors, centroidGetter);
         AsymmetricHashingResult result = quantizer.encode(vectors, centroidGetter, assignments, w);
 
         // Score a query against the encoded vectors
@@ -257,12 +257,12 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
         float[][] centroids = { new float[dim] };
         int[] assignments = { 0, 0 };
 
-        IntFunction<float[]> centroidGetter = (i) -> centroids[i];
+        IntFunction<float[]> centroidGetter = (i) -> centroids[assignments[i]];
 
         AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(0.25f, 1, AsymmetricHashingQuantizer.Method.LEARNED, 5, 10, 42L);
 
         // Should not throw — falls back to random
-        float[][] w = quantizer.train(vectors, centroidGetter, assignments);
+        float[][] w = quantizer.train(vectors, centroidGetter);
         assertNotNull(w);
         assertEquals(dim, w.length);
     }
