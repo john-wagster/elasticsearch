@@ -1192,7 +1192,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         VectorSimilarityFunction sim = fieldInfo.getVectorSimilarityFunction();
         if (sim == VectorSimilarityFunction.DOT_PRODUCT || sim == VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT) {
             // Scale centroids: widen to float, scale, round back to byte
-            float[][] floatCentroids = CentroidOps.BYTE.toFloatCentroids(centroids);
+            float[][] floatCentroids = byteCentroidsToFloat(centroids);
             scaleCentroidsToAverageMagnitude(floatCentroids, assignments, byteVectorValues);
             roundFloatCentroidsToBytes(floatCentroids, centroids);
         }
@@ -1225,7 +1225,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int[] soarAssignments = kMeansResult.soarAssignments();
         VectorSimilarityFunction sim = fieldInfo.getVectorSimilarityFunction();
         if (sim == VectorSimilarityFunction.DOT_PRODUCT || sim == VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT) {
-            float[][] floatCentroids = CentroidOps.BYTE.toFloatCentroids(centroids);
+            float[][] floatCentroids = byteCentroidsToFloat(centroids);
             scaleCentroidsToAverageMagnitude(floatCentroids, assignments, byteVectorValues);
             roundFloatCentroidsToBytes(floatCentroids, centroids);
         }
@@ -1278,9 +1278,23 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         }
     }
 
+    /** Widen byte centroids to float for scaling/preconditioning operations. */
+    private static float[][] byteCentroidsToFloat(byte[][] centroids) {
+        float[][] result = new float[centroids.length][];
+        for (int i = 0; i < centroids.length; i++) {
+            byte[] src = centroids[i];
+            float[] dst = new float[src.length];
+            for (int j = 0; j < src.length; j++) {
+                dst[j] = src[j];
+            }
+            result[i] = dst;
+        }
+        return result;
+    }
+
     @Override
     public CentroidSupplier createCentroidSupplier(FieldInfo info, byte[][] centroids, float[] globalCentroid) throws IOException {
-        float[][] floatCentroids = CentroidOps.BYTE.toFloatCentroids(centroids);
+        float[][] floatCentroids = byteCentroidsToFloat(centroids);
         CentroidSupplier centroidSupplier = CentroidSupplier.fromByteArray(
             centroids,
             floatCentroids,

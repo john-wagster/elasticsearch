@@ -80,37 +80,39 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
 
     // ---- Centroid update operations ----
 
+    /** Copy the first {@code dim} elements of {@code vector} into {@code centroid}. */
     void initCentroid(V centroid, V vector, int dim);
 
     /**
-     * Abstracts accumulation and finalization of centroid updates, parameterized by
-     * accumulator type {@code W} and vector type {@code V}.
+     * Creates a reusable accumulator state for mean-based centroid updates via
+     * {@link CentroidAssignment#updateCentroids}.
      * <p>
-     * {@link FloatOps} implements this as {@code Accumulator<float[], float[]>} where the
-     * accumulator is the centroid itself. {@link ByteOps} implements as {@code Accumulator<int[], byte[]>}
-     * using int-precision accumulators to avoid overflow during summation.
+     * For {@link FloatOps}, accumulation happens directly on the centroid arrays (no extra allocation).
+     * For {@link ByteOps}, allocates {@code int[k][dim]} accumulators to avoid overflow during summation.
+     * <p>
+     * Callers should allocate once and reuse across iterations to avoid repeated allocation.
      *
-     * @param <W> the accumulator array type ({@code float[]} for floats, {@code int[]} for bytes)
-     * @param <V> the vector/centroid array type ({@code float[]} or {@code byte[]})
+     * @param centroids the centroid array
+     * @param k number of centroids
+     * @param dim vector dimension
      */
-    interface Accumulator<W, V> {
-        /**
-         * Accumulate a vector into the accumulator: {@code accumulator[d] += vector[d]},
-         * widening as needed for the byte path.
-         */
-        void accumulate(W accumulator, V vector, int dim);
+    AccumulatorState<V> newAccumulatorState(V[] centroids, int k, int dim);
 
-        /**
-         * Initialize the accumulator from a vector (first assignment for a cluster).
-         * Copies vector values into the accumulator, widening for the byte path.
-         */
-        void initAccumulator(W accumulator, V vector, int dim);
+    /**
+     * Opaque, reusable state for mean-based centroid accumulation.
+     * Encapsulates the accumulator array and type-specific operations (init, accumulate, divide).
+     *
+     * @param <V> the vector/centroid array type
+     */
+    interface AccumulatorState<V> {
+        /** Initialize accumulator for cluster {@code k} from the given vector (first assignment). */
+        void init(int k, V vector, int dim);
 
-        /**
-         * Divide the accumulator by {@code count} and write the result into {@code centroid}.
-         * For float ops, this divides in place. For byte ops, this rounds and clamps to byte range.
-         */
-        void divideAccumulator(V centroid, W accumulator, float count, int dim);
+        /** Accumulate a vector into cluster {@code k}'s accumulator. */
+        void accumulate(int k, V vector, int dim);
+
+        /** Divide accumulator for cluster {@code k} by count and write result into centroids[k]. */
+        void divide(V[] centroids, int k, float count, int dim);
     }
 
     /**
@@ -139,10 +141,67 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
     void computeDiffs(V vector, V centroid, float[] diffs);
 
     /**
-     * Convert centroids to {@code float[][]} for use with float-only subsystems (e.g. {@link NeighborHood}).
-     * For {@link FloatOps} this is a no-op cast. For {@link ByteOps} this widens each byte to float.
+     * Creates a scoped mutation context for SGD-based centroid updates.
+     * <p>
+     * For {@link FloatOps}, the context operates directly on the centroid arrays (no allocation).
+     * For {@link ByteOps}, the context maintains a single reusable float-precision buffer that
+     * is loaded from the native centroid on first access and flushed back when switching centroids
+     * or on close.
+     * <p>
+     * Callers should access centroids in grouped order (all accesses to centroid {@code c} before
+     * moving to centroid {@code c+1}) to avoid unnecessary flush/reload cycles.
+     * <p>
+     * Usage:
+     * <pre>{@code
+     * try (var sgd = ops.newMutationContext(centroids, dim)) {
+     *     float[] fc = sgd.floatCentroid(k);
+     *     // mutate fc...
+     *     sgd.syncToNative(); // flush before distance computation
+     * } // auto-syncs and releases buffer
+     * }</pre>
+     *
+     * @param centroids the centroid array to mutate
+     * @param dim the vector dimension
      */
-    float[][] toFloatCentroids(V[] centroids);
+    MutationContext<V> newMutationContext(V[] centroids, int dim);
+
+    /**
+     * A scoped, autocloseable context for SGD centroid updates that provides float-precision
+     * access to centroids and syncs back to the native representation on close.
+     * <p>
+     * The context uses a single reusable float buffer. The array returned by {@link #floatCentroid(int)}
+     * is only valid until the next call with a <em>different</em> {@code k}. Calling with the same
+     * {@code k} returns the same buffer without reloading.
+     *
+     * @param <V> the centroid array type
+     */
+    interface MutationContext<V> extends AutoCloseable {
+        /**
+         * Returns the float-precision view of centroid {@code k} for direct mutation.
+         * <p>
+         * For float centroids this is the centroid itself. For byte centroids, the context
+         * loads the centroid into an internal float buffer, flushing any previously loaded
+         * centroid back to its native representation first.
+         * <p>
+         * The returned array is valid until the next call to {@code floatCentroid()} with a
+         * different {@code k}, or until {@link #syncToNative()} or {@link #close()} is called.
+         */
+        float[] floatCentroid(int k);
+
+        /**
+         * Flush any pending float-precision changes back to the native centroid representation.
+         * After this call, the next {@code floatCentroid()} will reload from the native centroid.
+         * Called automatically by {@link #close()}, but may also be called explicitly
+         * between SGD epochs (e.g. before distance computation on byte centroids).
+         */
+        void syncToNative();
+
+        /**
+         * Closes this context, flushing any pending changes and releasing the float buffer.
+         */
+        @Override
+        void close();
+    }
 
     // ---- Convergence ----
 
@@ -164,7 +223,7 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
      * {@link CentroidOps} for {@code float[]} vectors and centroids.
      * Delegates to {@link ESVectorUtil} for SIMD-accelerated operations.
      */
-    final class FloatOps implements CentroidOps<float[]>, Accumulator<float[], float[]> {
+    final class FloatOps implements CentroidOps<float[]> {
 
         public static final FloatOps INSTANCE = new FloatOps();
 
@@ -260,20 +319,17 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
             System.arraycopy(vector, 0, centroid, 0, dim);
         }
 
-        @Override
-        public void accumulate(float[] centroid, float[] vector, int dim) {
+        private void accumulate(float[] centroid, float[] vector, int dim) {
             for (int d = 0; d < dim; d++) {
                 centroid[d] += vector[d];
             }
         }
 
-        @Override
-        public void initAccumulator(float[] centroid, float[] vector, int dim) {
+        private void initAccumulator(float[] centroid, float[] vector, int dim) {
             initCentroid(centroid, vector, dim);
         }
 
-        @Override
-        public void divideAccumulator(float[] centroid, float[] accumulator, float count, int dim) {
+        private void divideAccumulator(float[] centroid, float[] accumulator, float count, int dim) {
             for (int d = 0; d < dim; d++) {
                 centroid[d] = accumulator[d] / count;
             }
@@ -321,18 +377,60 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
         }
 
         @Override
-        public float[][] toFloatCentroids(float[][] centroids) {
-            return centroids;
+        public AccumulatorState<float[]> newAccumulatorState(float[][] centroids, int k, int dim) {
+            // Float centroids accumulate in place — the centroid array IS the accumulator
+            return new AccumulatorState<>() {
+                @Override
+                public void init(int k, float[] vector, int dim) {
+                    System.arraycopy(vector, 0, centroids[k], 0, dim);
+                }
+
+                @Override
+                public void accumulate(int k, float[] vector, int dim) {
+                    float[] centroid = centroids[k];
+                    for (int d = 0; d < dim; d++) {
+                        centroid[d] += vector[d];
+                    }
+                }
+
+                @Override
+                public void divide(float[][] ignored, int k, float count, int dim) {
+                    float[] centroid = centroids[k];
+                    for (int d = 0; d < dim; d++) {
+                        centroid[d] /= count;
+                    }
+                }
+            };
+        }
+
+        @Override
+        public MutationContext<float[]> newMutationContext(float[][] centroids, int dim) {
+            return new MutationContext<>() {
+                @Override
+                public float[] floatCentroid(int k) {
+                    return centroids[k];
+                }
+
+                @Override
+                public void syncToNative() {
+                    // no-op: float centroids are mutated in place
+                }
+
+                @Override
+                public void close() {
+                    // no-op
+                }
+            };
         }
     }
 
     /**
      * {@link CentroidOps} for {@code byte[]} vectors and centroids.
      * <p>
-     * Centroid averaging uses {@code int[]} accumulators via the {@link Accumulator} interface.
-     * SGD updates use float shadow arrays (see {@code BalancedASKMeansLocal}, {@code BalancedOTKMeansLocal}).
+     * Centroid averaging uses {@code int[]} accumulators to avoid overflow during summation.
+     * SGD updates use a single reusable float buffer (see {@code BalancedASKMeansLocal}, {@code BalancedOTKMeansLocal}).
      */
-    final class ByteOps implements CentroidOps<byte[]>, Accumulator<int[], byte[]> {
+    final class ByteOps implements CentroidOps<byte[]> {
 
         public static final ByteOps INSTANCE = new ByteOps();
 
@@ -424,22 +522,19 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
             System.arraycopy(vector, 0, centroid, 0, dim);
         }
 
-        @Override
-        public void accumulate(int[] centroid, byte[] vector, int dim) {
+        private void accumulate(int[] centroid, byte[] vector, int dim) {
             for (int d = 0; d < dim; d++) {
                 centroid[d] += vector[d];
             }
         }
 
-        @Override
-        public void initAccumulator(int[] centroid, byte[] vector, int dim) {
+        private void initAccumulator(int[] centroid, byte[] vector, int dim) {
             for (int d = 0; d < dim; d++) {
                 centroid[d] = vector[d];
             }
         }
 
-        @Override
-        public void divideAccumulator(byte[] centroid, int[] accumulator, float count, int dim) {
+        private void divideAccumulator(byte[] centroid, int[] accumulator, float count, int dim) {
             for (int d = 0; d < dim; d++) {
                 // Round the average and clamp to byte range
                 centroid[d] = (byte) Math.clamp(Math.round((float) accumulator[d] / count), -128, 127);
@@ -489,17 +584,82 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
         }
 
         @Override
-        public float[][] toFloatCentroids(byte[][] centroids) {
-            float[][] result = new float[centroids.length][];
-            for (int i = 0; i < centroids.length; i++) {
-                byte[] src = centroids[i];
-                float[] dst = new float[src.length];
-                for (int j = 0; j < src.length; j++) {
-                    dst[j] = src[j];
+        public AccumulatorState<byte[]> newAccumulatorState(byte[][] centroids, int k, int dim) {
+            int[][] accumulators = new int[k][dim];
+            return new AccumulatorState<>() {
+                @Override
+                public void init(int k, byte[] vector, int dim) {
+                    int[] acc = accumulators[k];
+                    for (int d = 0; d < dim; d++) {
+                        acc[d] = vector[d];
+                    }
                 }
-                result[i] = dst;
+
+                @Override
+                public void accumulate(int k, byte[] vector, int dim) {
+                    int[] acc = accumulators[k];
+                    for (int d = 0; d < dim; d++) {
+                        acc[d] += vector[d];
+                    }
+                }
+
+                @Override
+                public void divide(byte[][] centroids, int k, float count, int dim) {
+                    int[] acc = accumulators[k];
+                    byte[] centroid = centroids[k];
+                    for (int d = 0; d < dim; d++) {
+                        centroid[d] = (byte) Math.clamp(Math.round(acc[d] / count), -128, 127);
+                    }
+                }
+            };
+        }
+
+        @Override
+        public MutationContext<byte[]> newMutationContext(byte[][] centroids, int dim) {
+            // Single reusable float buffer — only one centroid is loaded at a time.
+            // Callers must access centroids in grouped order (all accesses to centroid c
+            // before moving to centroid c+1) to avoid quantization noise from premature
+            // flush/reload cycles through byte[].
+            // TODO: a pool of N float[] buffers could improve cache locality for workloads
+            // that interleave centroid accesses; evaluate if benchmarks show benefit.
+            float[] buffer = new float[dim];
+            return new MutationContext<>() {
+                int currentK = -1;
+
+                @Override
+                public float[] floatCentroid(int k) {
+                    if (k != currentK) {
+                        if (currentK >= 0) {
+                            flushToNative(centroids[currentK], buffer, dim);
+                        }
+                        byte[] src = centroids[k];
+                        for (int d = 0; d < dim; d++) {
+                            buffer[d] = src[d];
+                        }
+                        currentK = k;
+                    }
+                    return buffer;
+                }
+
+                @Override
+                public void syncToNative() {
+                    if (currentK >= 0) {
+                        flushToNative(centroids[currentK], buffer, dim);
+                        currentK = -1;
+                    }
+                }
+
+                @Override
+                public void close() {
+                    syncToNative();
+                }
+            };
+        }
+
+        private static void flushToNative(byte[] byteCentroid, float[] floatBuffer, int dim) {
+            for (int d = 0; d < dim; d++) {
+                byteCentroid[d] = (byte) Math.clamp(Math.round(floatBuffer[d]), -128, 127);
             }
-            return result;
         }
 
     }
