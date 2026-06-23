@@ -34,6 +34,7 @@ import org.apache.lucene.util.VectorUtil;
 import org.elasticsearch.core.IOUtils;
 import org.elasticsearch.index.codec.vectors.GenericFlatVectorReaders;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringFloatVectorValues;
+import org.elasticsearch.index.codec.vectors.cluster.ClusteringVectorValues;
 import org.elasticsearch.search.vectors.ESAcceptDocs;
 import org.elasticsearch.search.vectors.IVFKnnSearchStrategy;
 
@@ -90,7 +91,7 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
 
     protected final IndexInput ivfCentroids, ivfClusters;
     private final SegmentReadState state;
-    private final FieldInfos fieldInfos;
+    protected final FieldInfos fieldInfos;
     protected final IntObjectHashMap<E> fields;
     private final GenericFlatVectorReaders genericReaders;
     private final String centroidExtension;
@@ -653,10 +654,10 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
      * Implementations may return {@code null} if the format does not support reading centroid data
      * (e.g. because the layout differs from the writer that consumes this data).
      *
-     * @param fieldInfo the vector field to read centroids for
+     * @param fieldName the vector field to read centroids for
      * @return centroid data, or {@code null} if unavailable
      */
-    public abstract CentroidData readCentroidData(FieldInfo fieldInfo) throws IOException;
+    public abstract CentroidData readCentroidData(String fieldName) throws IOException;
 
     /**
      * Container for centroid data read from an existing segment. The centroid vectors are
@@ -665,14 +666,15 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
      * on the heap. The optional {@code backing} {@link IndexInput} owns any sliced resources
      * required by the streaming view; {@link #close()} releases it.
      */
-    public static final class CentroidData implements Closeable {
+    public static final class CentroidData<V> implements Closeable {
         private final int numCentroids;
-        private final ClusteringFloatVectorValues centroids;
+        private final ClusteringVectorValues<V> centroids;
         private final int[] clusterSizes;
         private final float[] globalCentroid;
         private final IndexInput backing;
 
-        public CentroidData(ClusteringFloatVectorValues centroids, int[] clusterSizes, float[] globalCentroid, IndexInput backing) {
+        // FIXME: usages of CentroidData need to created with the correct type for V either float[] or byte[] or we need to encapsulate the type in CentroidData
+        public CentroidData(ClusteringVectorValues<V> centroids, int[] clusterSizes, float[] globalCentroid, IndexInput backing) {
             assert centroids.size() == clusterSizes.length;
             this.numCentroids = centroids.size();
             this.centroids = centroids;
@@ -685,7 +687,7 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
             return numCentroids;
         }
 
-        public ClusteringFloatVectorValues centroids() {
+        public ClusteringVectorValues<V> centroids() {
             return centroids;
         }
 
