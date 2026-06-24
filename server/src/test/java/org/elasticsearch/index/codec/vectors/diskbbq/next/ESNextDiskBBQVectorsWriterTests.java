@@ -29,6 +29,7 @@ import org.elasticsearch.test.ESTestCase;
 
 import java.util.Arrays;
 
+@SuppressWarnings({ "rawtypes", "unchecked" })
 public class ESNextDiskBBQVectorsWriterTests extends ESTestCase {
 
     static {

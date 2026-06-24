@@ -24,6 +24,7 @@ import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.IOSupplier;
+import org.elasticsearch.index.codec.vectors.diskbbq.IvfQueryConfigResolver;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -52,11 +53,11 @@ public class IVFKnnByteSlicedVectorQuery extends IVFKnnByteVectorQuery {
         int numCands,
         Query filter,
         float visitRatio,
-        boolean doPrecondition,
+        IvfQueryConfigResolver queryConfigResolver,
         String sliceField,
         BytesRef sliceId
     ) {
-        super(field, query, k, numCands, filter, visitRatio, doPrecondition);
+        super(field, query, k, numCands, filter, visitRatio, queryConfigResolver);
         this.sliceField = Objects.requireNonNull(sliceField);
         this.sliceId = Objects.requireNonNull(sliceId);
     }
@@ -108,7 +109,14 @@ public class IVFKnnByteSlicedVectorQuery extends IVFKnnByteVectorQuery {
             if (supplier == null) {
                 return TopDocsCollector.EMPTY_TOPDOCS;
             }
-            acceptDocs = new ESAcceptDocs.ScorerSupplierAcceptDocs(supplier, liveDocs, maxDoc, sliceOrd, sliceAcceptDocsSupplier);
+            acceptDocs = new ESAcceptDocs.ScorerSupplierAcceptDocs(
+                () -> supplier.get(Long.MAX_VALUE).iterator(),
+                supplier::cost,
+                liveDocs,
+                maxDoc,
+                sliceOrd,
+                sliceAcceptDocsSupplier
+            );
         }
         return approximateSearch(ctx, acceptDocs, Integer.MAX_VALUE, knnCollectorManager, visitRatio);
     }

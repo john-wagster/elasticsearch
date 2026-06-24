@@ -10,7 +10,6 @@
 package org.elasticsearch.index.codec.vectors.diskbbq.next;
 
 import org.apache.lucene.index.FieldInfo;
-import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.VectorEncoding;
@@ -27,14 +26,12 @@ import org.apache.lucene.util.packed.DirectReader;
 import org.apache.lucene.util.packed.DirectWriter;
 import org.elasticsearch.index.codec.vectors.GenericFlatVectorReaders;
 import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
-import org.elasticsearch.index.codec.vectors.cluster.KMeansByteVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.NeighborQueue;
 import org.elasticsearch.index.codec.vectors.diskbbq.CalibrationAwareReader;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIterator;
 import org.elasticsearch.index.codec.vectors.diskbbq.DocIdsWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader;
-import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader.QueryTarget;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibration;
 import org.elasticsearch.index.codec.vectors.diskbbq.PostingMetadata;
@@ -362,7 +359,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
     }
 
     @Override
-    public CentroidData readCentroidData(String fieldName) throws IOException {
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    public CentroidData<?> readCentroidData(String fieldName) throws IOException {
         FieldInfo fieldInfo = fieldInfos.fieldInfo(fieldName);
         if (fieldInfo == null) {
             return null;

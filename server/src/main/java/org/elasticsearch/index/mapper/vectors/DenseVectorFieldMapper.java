@@ -3328,6 +3328,16 @@ public class DenseVectorFieldMapper extends FieldMapper {
             } else if (indexOptions instanceof BBQIVFIndexOptions bbqIndexOptions) {
                 float defaultVisitRatio = (float) (bbqIndexOptions.defaultVisitPercentage / 100d);
                 float visitRatio = visitPercentage == null ? defaultVisitRatio : (float) (visitPercentage / 100d);
+                float mappingOversample = bbqIndexOptions.rescoreVector != null
+                    ? bbqIndexOptions.rescoreVector.oversample
+                    : DEFAULT_OVERSAMPLE;
+                var ivfQueryConfigResolver = IvfQueryConfigResolver.from(
+                    bbqIndexOptions.autoCalibrate,
+                    bbqIndexOptions.doPrecondition,
+                    bbqIndexOptions.bits,
+                    mappingOversample,
+                    queryOversample
+                );
                 knnQuery = parentFilter != null
                     ? new DiversifyingChildrenIVFKnnByteVectorQuery(
                         name(),
@@ -3337,7 +3347,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                         filter,
                         parentFilter,
                         visitRatio,
-                        bbqIndexOptions.doPrecondition()
+                        ivfQueryConfigResolver
                     )
                     : new IVFKnnByteVectorQuery(
                         name(),
@@ -3346,7 +3356,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                         numCands,
                         filter,
                         visitRatio,
-                        bbqIndexOptions.doPrecondition()
+                        ivfQueryConfigResolver
                     );
             } else {
                 knnQuery = parentFilter != null

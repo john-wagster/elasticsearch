@@ -136,12 +136,13 @@ public class TieredMergeStrategy {
      * @param centroidData     per-segment centroid data (may contain nulls for segments without centroids)
      * @return a merge action ready to execute
      */
-    public MergeAction selectAction(int[] segmentSizes, int[] segmentCentroids, IVFVectorsReader.CentroidData[] centroidData) {
+    @SuppressWarnings("unchecked")
+    public MergeAction selectAction(int[] segmentSizes, int[] segmentCentroids, IVFVectorsReader.CentroidData<float[]>[] centroidData) {
         Strategy strategy = selectStrategy(segmentSizes, segmentCentroids);
         return switch (strategy) {
             case INSERTION -> {
                 int dominantIdx = findDominantSegment(segmentSizes);
-                yield new Insertion(centroidData[dominantIdx].centroids());
+                yield new Insertion((ClusteringFloatVectorValues) centroidData[dominantIdx].centroids());
             }
             case CONCATENATION -> {
                 List<ClusteringFloatVectorValues> parts = new ArrayList<>();
@@ -149,9 +150,9 @@ public class TieredMergeStrategy {
                 int totalSizes = 0;
                 int coveredVectorCount = 0;
                 for (int i = 0; i < centroidData.length; i++) {
-                    IVFVectorsReader.CentroidData data = centroidData[i];
+                    IVFVectorsReader.CentroidData<float[]> data = centroidData[i];
                     if (data != null) {
-                        parts.add(data.centroids());
+                        parts.add((ClusteringFloatVectorValues) data.centroids());
                         sizesParts.add(data.clusterSizes());
                         totalSizes += data.clusterSizes().length;
                         coveredVectorCount += segmentSizes[i];

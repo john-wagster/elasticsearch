@@ -16,15 +16,24 @@ import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.SegmentReader;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.AcceptDocs;
+import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScorerSupplier;
 import org.apache.lucene.search.TopDocs;
+import org.apache.lucene.search.TopDocsCollector;
+import org.apache.lucene.search.Weight;
+import org.apache.lucene.util.Bits;
+import org.apache.lucene.util.IOSupplier;
 import org.apache.lucene.util.VectorUtil;
 import org.elasticsearch.common.lucene.Lucene;
+import org.elasticsearch.index.codec.vectors.diskbbq.IvfQueryConfigResolver;
 import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
 import org.elasticsearch.index.codec.vectors.diskbbq.VectorPreconditioner;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.function.LongSupplier;
 
 /**
  * An IVF kNN query for byte-encoded vector fields. For COSINE similarity, the query vector is
@@ -45,10 +54,18 @@ public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
      * @param numCands the number of nearest neighbors to gather per shard
      * @param filter the filter to apply to the results
      * @param visitRatio the ratio of vectors to score for the IVF search strategy
-     * @param doPrecondition whether to apply preconditioning
+     * @param queryConfigResolver resolves per-segment IVF configuration
      */
-    public IVFKnnByteVectorQuery(String field, byte[] query, int k, int numCands, Query filter, float visitRatio, boolean doPrecondition) {
-        super(field, visitRatio, k, numCands, filter, doPrecondition);
+    public IVFKnnByteVectorQuery(
+        String field,
+        byte[] query,
+        int k,
+        int numCands,
+        Query filter,
+        float visitRatio,
+        IvfQueryConfigResolver queryConfigResolver
+    ) {
+        super(field, visitRatio, k, numCands, filter, queryConfigResolver);
         this.query = query;
     }
 
@@ -142,7 +159,44 @@ public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
     }
 
     @Override
-    protected TopDocs approximateSearch(
+    TopDocs getLeafResults(LeafReaderContext ctx, Weight filterWeight, IVFCollectorManager knnCollectorManager, float visitRatio)
+        throws IOException {
+        final LeafReader reader = ctx.reader();
+        final Bits liveDocs = reader.getLiveDocs();
+        final int maxDoc = reader.maxDoc();
+
+        if (filterWeight == null) {
+            return approximateSearch(
+                ctx,
+                liveDocs == null ? new ESAcceptDocs.ESAcceptDocsAll() : new ESAcceptDocs.BitsAcceptDocs(liveDocs, maxDoc),
+                Integer.MAX_VALUE,
+                knnCollectorManager,
+                visitRatio
+            );
+        }
+
+        ScorerSupplier supplier = filterWeight.scorerSupplier(ctx);
+        if (supplier == null) {
+            return TopDocsCollector.EMPTY_TOPDOCS;
+        }
+        IOSupplier<DocIdSetIterator> docIdIteratorSupplier = () -> supplier.get(Long.MAX_VALUE).iterator();
+        LongSupplier costSupplier = supplier::cost;
+        return approximateSearch(
+            ctx,
+            new ESAcceptDocs.ScorerSupplierAcceptDocs(docIdIteratorSupplier, costSupplier, liveDocs, maxDoc),
+            Integer.MAX_VALUE,
+            knnCollectorManager,
+            visitRatio
+        );
+    }
+
+    @Override
+    Query getAutoRescoreQuery(IndexSearcher indexSearcher, TopDocs topOversampled, int effectiveK) {
+        // Byte vectors don't support auto-rescore currently
+        return null;
+    }
+
+    TopDocs approximateSearch(
         LeafReaderContext context,
         AcceptDocs acceptDocs,
         int visitedLimit,

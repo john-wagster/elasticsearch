@@ -13,6 +13,7 @@ import org.elasticsearch.test.ESTestCase;
 
 import java.util.Arrays;
 
+@SuppressWarnings({ "rawtypes", "unchecked" })
 public class TieredMergeStrategyTests extends ESTestCase {
 
     public void testAllSmallSegmentsSelectsFullRebuild() {

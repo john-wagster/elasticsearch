@@ -32,6 +32,7 @@ import org.apache.lucene.tests.util.TestUtil;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.logging.LogConfigurator;
 import org.elasticsearch.index.cache.query.TrivialQueryCachingPolicy;
+import org.elasticsearch.index.codec.vectors.diskbbq.TestIvfQueryConfigResolver;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat;
 
 import java.io.IOException;
@@ -83,7 +84,7 @@ public class IVFKnnByteSlicedVectorQueryTests extends LuceneTestCase {
                     10,
                     null,
                     1.0f,
-                    random().nextBoolean(),
+                    new TestIvfQueryConfigResolver(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, false, 1.0f),
                     SLICE_FIELD,
                     querySlice
                 );
@@ -98,7 +99,7 @@ public class IVFKnnByteSlicedVectorQueryTests extends LuceneTestCase {
                     10,
                     filter,
                     1.0f,
-                    random().nextBoolean(),
+                    new TestIvfQueryConfigResolver(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, false, 1.0f),
                     SLICE_FIELD,
                     querySlice
                 );
@@ -215,7 +216,7 @@ public class IVFKnnByteSlicedVectorQueryTests extends LuceneTestCase {
                             k,
                             filterQuery,
                             1.0f,
-                            random().nextBoolean(),
+                            new TestIvfQueryConfigResolver(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, false, 1.0f),
                             SLICE_FIELD,
                             new BytesRef("" + slice)
                         );
@@ -237,7 +238,7 @@ public class IVFKnnByteSlicedVectorQueryTests extends LuceneTestCase {
                         3,
                         filterQuery,
                         1.0f,
-                        random().nextBoolean(),
+                        new TestIvfQueryConfigResolver(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, false, 1.0f),
                         SLICE_FIELD,
                         new BytesRef("invalid")
                     );

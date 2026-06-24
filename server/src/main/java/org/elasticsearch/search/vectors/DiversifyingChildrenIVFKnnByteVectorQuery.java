@@ -12,6 +12,7 @@ package org.elasticsearch.search.vectors;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.join.BitSetProducer;
+import org.elasticsearch.index.codec.vectors.diskbbq.IvfQueryConfigResolver;
 
 import java.util.Objects;
 
@@ -29,7 +30,7 @@ public class DiversifyingChildrenIVFKnnByteVectorQuery extends IVFKnnByteVectorQ
      * @param childFilter   the filter to apply to the results
      * @param parentsFilter bitset producer for the parent documents
      * @param visitRatio    the ratio of documents to be scored for the IVF search strategy
-     * @param doPrecondition whether to apply preconditioning
+     * @param queryConfigResolver resolves per-segment IVF configuration
      */
     public DiversifyingChildrenIVFKnnByteVectorQuery(
         String field,
@@ -39,9 +40,9 @@ public class DiversifyingChildrenIVFKnnByteVectorQuery extends IVFKnnByteVectorQ
         Query childFilter,
         BitSetProducer parentsFilter,
         float visitRatio,
-        boolean doPrecondition
+        IvfQueryConfigResolver queryConfigResolver
     ) {
-        super(field, query, k, numCands, childFilter, visitRatio, doPrecondition);
+        super(field, query, k, numCands, childFilter, visitRatio, queryConfigResolver);
         this.parentsFilter = parentsFilter;
     }
 

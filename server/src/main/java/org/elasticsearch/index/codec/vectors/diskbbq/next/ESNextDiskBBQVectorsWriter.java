@@ -52,6 +52,7 @@ import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSupplier;
 import org.elasticsearch.index.codec.vectors.diskbbq.DiskBBQBulkWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.DocIdsWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader;
+import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader.CentroidData;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IntSorter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IntToBooleanFunction;
@@ -995,6 +996,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     // FIXME: need to account for byte[] vectors
     @Override
     @SuppressForbidden(reason = "require usage of Lucene's IOUtils#closeWhileHandlingException(...)")
+    @SuppressWarnings({ "rawtypes", "unchecked" })
     public CentroidAssignments<float[]> calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues, MergeState mergeState)
         throws IOException {
         // Sliced indices treat each slice as an independent partition that must be clustered on its
@@ -1009,7 +1011,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int numSegments = mergeState.knnVectorsReaders.length;
         int[] segmentSizes = new int[numSegments];
         int[] segmentCentroidCounts = new int[numSegments];
-        IVFVectorsReader.CentroidData[] segmentCentroidData = new IVFVectorsReader.CentroidData[numSegments];
+        @SuppressWarnings({ "rawtypes", "unchecked" })
+        IVFVectorsReader.CentroidData<float[]>[] segmentCentroidData = new IVFVectorsReader.CentroidData[numSegments];
 
         try {
             for (int i = 0; i < numSegments; i++) {
@@ -1019,8 +1022,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                 }
                 if (reader instanceof IVFVectorsReader<?> ivfReader && mergeState.fieldInfos[i].fieldInfo(fieldInfo.name) != null) {
                     segmentSizes[i] = ivfReader.getFloatVectorValues(fieldInfo.name).size();
-                    segmentCentroidData[i] = ivfReader.readCentroidData(fieldInfo.name);
-                    segmentCentroidCounts[i] = segmentCentroidData[i] != null ? segmentCentroidData[i].numCentroids() : 0;
+                    @SuppressWarnings("unchecked")
+                    CentroidData<float[]> data = (CentroidData<float[]>) ivfReader.readCentroidData(fieldInfo.name);
+                    segmentCentroidData[i] = data;
+                    segmentCentroidCounts[i] = data != null ? data.numCentroids() : 0;
                 } else {
                     segmentSizes[i] = 0;
                     segmentCentroidCounts[i] = 0;
@@ -1299,11 +1304,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int[] soarAssignments = kMeansResult.soarAssignments();
         VectorSimilarityFunction sim = fieldInfo.getVectorSimilarityFunction();
         if (sim == VectorSimilarityFunction.DOT_PRODUCT || sim == VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT) {
-            // Scale centroids: widen to float, scale, round back to byte
-            // FIXME: need to account for byte[] vectors can't do this ... we need to do it one float vector at a time
-            float[][] floatCentroids = byteCentroidsToFloat(centroids);
-            scaleCentroidsToAverageMagnitude(floatCentroids, assignments, byteVectorValues);
-            roundFloatCentroidsToBytes(floatCentroids, centroids);
+            // Scale byte centroids in place using a single float scratch buffer per centroid
+            scaleByteCentroidsToAverageMagnitude(centroids, assignments, byteVectorValues);
         }
         return CentroidAssignments.ofBytes(fieldInfo.getVectorDimension(), centroids, assignments, soarAssignments);
     }
@@ -1334,22 +1336,22 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int[] soarAssignments = kMeansResult.soarAssignments();
         VectorSimilarityFunction sim = fieldInfo.getVectorSimilarityFunction();
         if (sim == VectorSimilarityFunction.DOT_PRODUCT || sim == VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT) {
-            float[][] floatCentroids = byteCentroidsToFloat(centroids);
-            scaleCentroidsToAverageMagnitude(floatCentroids, assignments, byteVectorValues);
-            roundFloatCentroidsToBytes(floatCentroids, centroids);
+            scaleByteCentroidsToAverageMagnitude(centroids, assignments, byteVectorValues);
         }
         return CentroidAssignments.ofBytes(fieldInfo.getVectorDimension(), centroids, assignments, soarAssignments);
     }
 
     /**
-     * Scales each centroid so its magnitude matches the average magnitude of byte vectors assigned to it.
-     * Widened byte vectors are used for magnitude computation.
+     * Scales each byte centroid so its magnitude matches the average magnitude of byte vectors assigned to it.
+     * Processes one centroid at a time using a single float[dim] scratch buffer to avoid bulk float[][] allocation.
      */
-    private static void scaleCentroidsToAverageMagnitude(float[][] centroids, int[] assignments, ClusteringByteVectorValues byteVectors)
+    private static void scaleByteCentroidsToAverageMagnitude(byte[][] centroids, int[] assignments, ClusteringByteVectorValues byteVectors)
         throws IOException {
         int numCentroids = centroids.length;
+        int dim = centroids[0].length;
         double[] magnitudeSum = new double[numCentroids];
         int[] assignmentCount = new int[numCentroids];
+        // Pass 1: accumulate vector magnitudes per centroid
         for (int i = 0; i < assignments.length; i++) {
             int centroidOrd = assignments[i];
             byte[] vector = byteVectors.vectorValue(i);
@@ -1357,65 +1359,46 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             magnitudeSum[centroidOrd] += norm;
             assignmentCount[centroidOrd]++;
         }
+        // Pass 2: scale each centroid one at a time using a single float scratch buffer
+        float[] scratch = new float[dim];
         for (int c = 0; c < numCentroids; c++) {
             if (assignmentCount[c] == 0) {
                 continue;
             }
             double avgMagnitude = magnitudeSum[c] / assignmentCount[c];
-            float[] centroid = centroids[c];
-            double centroidNorm = Math.sqrt(ESVectorUtil.dotProduct(centroid, centroid));
+            byte[] centroid = centroids[c];
+            // Load byte centroid into float scratch to compute norm
+            for (int d = 0; d < dim; d++) {
+                scratch[d] = centroid[d];
+            }
+            double centroidNorm = Math.sqrt(ESVectorUtil.dotProduct(scratch, scratch));
             if (Math.abs(avgMagnitude - centroidNorm) < 1e-8) {
                 continue;
             }
             if (centroidNorm > 0) {
                 float scale = (float) (avgMagnitude / centroidNorm);
-                for (int d = 0; d < centroid.length; d++) {
-                    centroid[d] *= scale;
+                for (int d = 0; d < dim; d++) {
+                    scratch[d] *= scale;
+                }
+                // Write scaled float back to byte centroid
+                for (int d = 0; d < dim; d++) {
+                    centroid[d] = (byte) Math.clamp(Math.round(scratch[d]), -128, 127);
                 }
             }
         }
     }
 
-    /**
-     * Rounds scaled float centroids back into the corresponding byte arrays in-place.
-     */
-    private static void roundFloatCentroidsToBytes(float[][] floatCentroids, byte[][] byteCentroids) {
-        for (int i = 0; i < floatCentroids.length; i++) {
-            for (int j = 0; j < floatCentroids[i].length; j++) {
-                byteCentroids[i][j] = (byte) Math.clamp(Math.round(floatCentroids[i][j]), -128, 127);
-            }
-        }
-    }
-
-    // FIXME: need to account for byte[] vectors ... this probably needs to be overhauled as any place we convert to float[][] for byte[] vector based centroids is a non-starter
-    /** Widen byte centroids to float for scaling/preconditioning operations. */
-    private static float[][] byteCentroidsToFloat(byte[][] centroids) {
-        float[][] result = new float[centroids.length][];
-        for (int i = 0; i < centroids.length; i++) {
-            byte[] src = centroids[i];
-            float[] dst = new float[src.length];
-            for (int j = 0; j < src.length; j++) {
-                dst[j] = src[j];
-            }
-            result[i] = dst;
-        }
-        return result;
-    }
-
     @Override
     public CentroidSupplier createCentroidSupplier(FieldInfo info, byte[][] centroids, float[] globalCentroid) throws IOException {
-        // FIXME: need to account for byte[] vectors
-        float[][] floatCentroids = byteCentroidsToFloat(centroids);
         CentroidSupplier centroidSupplier = CentroidSupplier.fromByteArray(
             centroids,
-            floatCentroids,
             KMeansResult.singleCluster(globalCentroid, centroids.length),
             info.getVectorDimension()
         );
         if (centroidSupplier.size() > centroidsPerParentCluster * centroidsPerParentCluster) {
-            // FIXME: need to account for byte[] vectors
+            // FIXME: second-level clustering uses float-widened centroids; evaluate native byte clustering for centroids in a follow-up
             KMeansResult<float[]> centroidClusters = buildSecondLevelClusters(info, centroidSupplier.asKmeansFloatVectorValues(), false);
-            return CentroidSupplier.fromByteArray(centroids, floatCentroids, centroidClusters, info.getVectorDimension());
+            return CentroidSupplier.fromByteArray(centroids, centroidClusters, info.getVectorDimension());
         }
         return centroidSupplier;
     }

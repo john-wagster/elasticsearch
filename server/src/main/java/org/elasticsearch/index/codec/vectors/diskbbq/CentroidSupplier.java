@@ -69,14 +69,12 @@ public interface CentroidSupplier {
         };
     }
 
-    static CentroidSupplier fromByteArray(
-        byte[][] byteCentroids,
-        float[][] floatCentroids,
-        KMeansResult<float[]> secondLevelClusters,
-        int dims
-    ) {
-        assert byteCentroids.length == floatCentroids.length;
+    static CentroidSupplier fromByteArray(byte[][] byteCentroids, KMeansResult<float[]> secondLevelClusters, int dims) {
         return new CentroidSupplier() {
+            // Single reusable scratch buffer for on-demand byte→float widening.
+            // The returned float[] is only valid until the next call to centroid().
+            private final float[] scratch = new float[dims];
+
             @Override
             public int size() {
                 return byteCentroids.length;
@@ -84,7 +82,11 @@ public interface CentroidSupplier {
 
             @Override
             public float[] centroid(int centroidOrdinal) {
-                return floatCentroids[centroidOrdinal];
+                byte[] src = byteCentroids[centroidOrdinal];
+                for (int d = 0; d < dims; d++) {
+                    scratch[d] = src[d];
+                }
+                return scratch;
             }
 
             @Override
@@ -99,7 +101,7 @@ public interface CentroidSupplier {
 
             @Override
             public KMeansFloatVectorValues asKmeansFloatVectorValues() {
-                return KMeansFloatVectorValues.build(Arrays.asList(floatCentroids), null, dims);
+                return KMeansFloatVectorValues.buildFromBytes(Arrays.asList(byteCentroids), null, dims, false);
             }
         };
     }

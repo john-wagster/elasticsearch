@@ -657,7 +657,7 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
      * @param fieldName the vector field to read centroids for
      * @return centroid data, or {@code null} if unavailable
      */
-    public abstract CentroidData readCentroidData(String fieldName) throws IOException;
+    public abstract CentroidData<?> readCentroidData(String fieldName) throws IOException;
 
     /**
      * Container for centroid data read from an existing segment. The centroid vectors are
