@@ -16,6 +16,7 @@ import org.apache.lucene.codecs.hnsw.FlatVectorsWriter;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInfo;
+import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.MergeState;
@@ -914,6 +915,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             }
             parentOrd++;
         }
+        // Write raw centroids for merge strategy centroid reuse
+        writeRawCentroids(centroidOutput, centroidSupplier, fieldInfo.getVectorDimension(), byteBacked);
     }
 
     private void writeCentroidsWithoutParents(
@@ -938,6 +941,34 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         for (int i = 0; i < centroidSupplier.size(); i++) {
             centroidOutput.writeLong(centroidOffsetAndLength.offsets().get(i));
             centroidOutput.writeLong(centroidOffsetAndLength.lengths().get(i));
+        }
+        // Write raw centroids for merge strategy centroid reuse
+        boolean byteBacked = fieldInfo.getVectorEncoding() == VectorEncoding.BYTE
+            && fieldInfo.getVectorSimilarityFunction() != VectorSimilarityFunction.COSINE;
+        writeRawCentroids(centroidOutput, centroidSupplier, fieldInfo.getVectorDimension(), byteBacked);
+    }
+
+    /**
+     * Writes raw (unquantized) centroids at the end of the centroid output so that the tiered merge
+     * strategy can reuse prior segment centroids without re-clustering.
+     * For byte-backed fields, centroids are written as 1 byte per dimension.
+     * For float-backed fields (including COSINE byte fields), centroids are written as 4 bytes (float) per dimension.
+     */
+    private static void writeRawCentroids(IndexOutput centroidOutput, CentroidSupplier centroidSupplier, int dimension, boolean byteBacked)
+        throws IOException {
+        if (byteBacked) {
+            for (int i = 0; i < centroidSupplier.size(); i++) {
+                byte[] bc = centroidSupplier.byteCentroid(i);
+                centroidOutput.writeBytes(bc, bc.length);
+            }
+        } else {
+            final ByteBuffer buffer = ByteBuffer.allocate(dimension * Float.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+            for (int i = 0; i < centroidSupplier.size(); i++) {
+                float[] centroid = centroidSupplier.centroid(i);
+                buffer.clear();
+                buffer.asFloatBuffer().put(centroid);
+                centroidOutput.writeBytes(buffer.array(), buffer.array().length);
+            }
         }
     }
 
@@ -1021,7 +1052,14 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                     reader = perFieldReader.getFieldReader(fieldInfo.name);
                 }
                 if (reader instanceof IVFVectorsReader<?> ivfReader && mergeState.fieldInfos[i].fieldInfo(fieldInfo.name) != null) {
-                    segmentSizes[i] = ivfReader.getFloatVectorValues(fieldInfo.name).size();
+                    // Get segment size — byte-encoded fields may not have float vector values
+                    FloatVectorValues fvv = ivfReader.getFloatVectorValues(fieldInfo.name);
+                    if (fvv != null) {
+                        segmentSizes[i] = fvv.size();
+                    } else {
+                        ByteVectorValues bvv = ivfReader.getByteVectorValues(fieldInfo.name);
+                        segmentSizes[i] = bvv != null ? bvv.size() : 0;
+                    }
                     @SuppressWarnings("unchecked")
                     CentroidData<float[]> data = (CentroidData<float[]>) ivfReader.readCentroidData(fieldInfo.name);
                     segmentCentroidData[i] = data;
