@@ -25,6 +25,8 @@ import org.apache.lucene.util.packed.DirectReader;
 import org.apache.lucene.util.packed.DirectWriter;
 import org.elasticsearch.index.codec.vectors.GenericFlatVectorReaders;
 import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
+import org.elasticsearch.index.codec.vectors.cluster.ClusteringVectorValues;
+import org.elasticsearch.index.codec.vectors.cluster.KMeansByteVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.diskbbq.CalibrationAwareReader;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIterator;
@@ -251,15 +253,26 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         }
         int dimension = fieldInfo.getVectorDimension();
         int numCentroids = entry.numCentroids();
-        FloatVectorValues vectorValues = getFloatVectorValues(fieldInfo.name);
+        final KnnVectorValues vectorValues;
+        if (fieldInfo.getVectorEncoding().equals(VectorEncoding.BYTE)) {
+            vectorValues = getByteVectorValues(fieldInfo.name);
+        } else {
+            vectorValues = getFloatVectorValues(fieldInfo.name);
+        }
         int numVectors = vectorValues != null ? vectorValues.size() : 0;
         int[] clusterSizes = new int[numCentroids];
 
-        long rawCentroidsSize = (long) numCentroids * dimension * Float.BYTES;
+        // Byte-backed fields (non-COSINE) store centroids as 1 byte per dimension;
+        // float-backed and COSINE byte fields store centroids as 4 bytes (float) per dimension.
+        boolean byteBacked = fieldInfo.getVectorEncoding() == VectorEncoding.BYTE
+            && fieldInfo.getVectorSimilarityFunction() != VectorSimilarityFunction.COSINE;
+        int bytesPerComponent = byteBacked ? Byte.BYTES : Float.BYTES;
+        long rawCentroidsSize = (long) numCentroids * dimension * bytesPerComponent;
+
         IndexInput centroidsSlice = null;
         boolean success = false;
         try (IndexInput centroidSlice = entry.centroidSlice(ivfCentroids); IndexInput postingSlice = entry.postingListSlice(ivfClusters)) {
-            long[] postingOffsets = readPostingListOffsets(centroidSlice, numVectors, numCentroids, dimension);
+            long[] postingOffsets = readPostingListOffsets(centroidSlice, numVectors, numCentroids, dimension, bytesPerComponent);
 
             // First pass: read cluster sizes only (from the posting slice).
             for (int c = 0; c < numCentroids; c++) {
@@ -272,7 +285,12 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             // outlives the parent centroidSlice.
             long centroidsOffset = centroidSlice.length() - rawCentroidsSize;
             centroidsSlice = centroidSlice.slice("centroids-raw", centroidsOffset, rawCentroidsSize);
-            KMeansFloatVectorValues centroids = KMeansFloatVectorValues.build(centroidsSlice, null, numCentroids, dimension);
+            ClusteringVectorValues centroids;
+            if (byteBacked) {
+                centroids = KMeansByteVectorValues.build(centroidsSlice, null, numCentroids, dimension);
+            } else {
+                centroids = KMeansFloatVectorValues.build(centroidsSlice, null, numCentroids, dimension);
+            }
             CentroidData data = new CentroidData(centroids, clusterSizes, entry.globalCentroid(), centroidsSlice);
             success = true;
             return data;
@@ -283,14 +301,19 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         }
     }
 
-    private static long[] readPostingListOffsets(IndexInput centroidSlice, int numVectors, int numCentroids, int dimension)
-        throws IOException {
+    private static long[] readPostingListOffsets(
+        IndexInput centroidSlice,
+        int numVectors,
+        int numCentroids,
+        int dimension,
+        int bytesPerComponent
+    ) throws IOException {
         long[] offsets = new long[numCentroids];
         int bitsRequired = DirectWriter.bitsRequired(numCentroids);
         long sizeLookup = DirectWriter.bytesRequired(numVectors, bitsRequired);
         centroidSlice.seek(sizeLookup);
         int numParents = centroidSlice.readVInt();
-        long rawCentroidsSize = (long) numCentroids * dimension * Float.BYTES;
+        long rawCentroidsSize = (long) numCentroids * dimension * bytesPerComponent;
         long offsetTableEntrySize = numParents == 0 ? 2L * Long.BYTES : 2L * Long.BYTES + Integer.BYTES;
         long offsetTableStart = centroidSlice.length() - rawCentroidsSize - offsetTableEntrySize * numCentroids;
 

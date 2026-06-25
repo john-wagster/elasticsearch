@@ -90,6 +90,7 @@ import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.aggregations.support.CoreValuesSourceType;
 import org.elasticsearch.search.lookup.Source;
 import org.elasticsearch.search.vectors.DenseVectorQuery;
+import org.elasticsearch.search.vectors.DiversifyingChildrenIVFKnnByteSlicedVectorQuery;
 import org.elasticsearch.search.vectors.DiversifyingChildrenIVFKnnByteVectorQuery;
 import org.elasticsearch.search.vectors.DiversifyingChildrenIVFKnnFloatSlicedVectorQuery;
 import org.elasticsearch.search.vectors.DiversifyingChildrenIVFKnnFloatVectorQuery;
@@ -98,6 +99,7 @@ import org.elasticsearch.search.vectors.ESDiversifyingChildrenByteKnnVectorQuery
 import org.elasticsearch.search.vectors.ESDiversifyingChildrenFloatKnnVectorQuery;
 import org.elasticsearch.search.vectors.ESKnnByteVectorQuery;
 import org.elasticsearch.search.vectors.ESKnnFloatVectorQuery;
+import org.elasticsearch.search.vectors.IVFKnnByteSlicedVectorQuery;
 import org.elasticsearch.search.vectors.IVFKnnByteVectorQuery;
 import org.elasticsearch.search.vectors.IVFKnnFloatSlicedVectorQuery;
 import org.elasticsearch.search.vectors.IVFKnnFloatVectorQuery;
@@ -3205,7 +3207,9 @@ public class DenseVectorFieldMapper extends FieldMapper {
                     similarityThreshold,
                     parentFilter,
                     knnSearchStrategy,
-                    hnswEarlyTermination
+                    hnswEarlyTermination,
+                    sliceEnabled,
+                    sliceRouting
                 );
                 case FLOAT, BFLOAT16 -> createKnnFloatQuery(
                     resolvedQueryVector.asFloatVector(),
@@ -3298,7 +3302,9 @@ public class DenseVectorFieldMapper extends FieldMapper {
             Float similarityThreshold,
             BitSetProducer parentFilter,
             KnnSearchStrategy searchStrategy,
-            boolean hnswEarlyTermination
+            boolean hnswEarlyTermination,
+            boolean sliceEnabled,
+            @Nullable String sliceRouting
         ) {
             element.checkDimensions(dims, queryVector.length);
 
@@ -3338,26 +3344,54 @@ public class DenseVectorFieldMapper extends FieldMapper {
                     mappingOversample,
                     queryOversample
                 );
-                knnQuery = parentFilter != null
-                    ? new DiversifyingChildrenIVFKnnByteVectorQuery(
-                        name(),
-                        queryVector,
-                        adjustedK,
-                        numCands,
-                        filter,
-                        parentFilter,
-                        visitRatio,
-                        ivfQueryConfigResolver
-                    )
-                    : new IVFKnnByteVectorQuery(
-                        name(),
-                        queryVector,
-                        adjustedK,
-                        numCands,
-                        filter,
-                        visitRatio,
-                        ivfQueryConfigResolver
-                    );
+                final BytesRef[] sliceIds = extractSliceRouting(sliceRouting, sliceEnabled);
+                if (sliceIds != null) {
+                    knnQuery = parentFilter != null
+                        ? new DiversifyingChildrenIVFKnnByteSlicedVectorQuery(
+                            name(),
+                            queryVector,
+                            adjustedK,
+                            numCands,
+                            filter,
+                            parentFilter,
+                            visitRatio,
+                            ivfQueryConfigResolver,
+                            RoutingFieldMapper.NAME,
+                            sliceIds
+                        )
+                        : new IVFKnnByteSlicedVectorQuery(
+                            name(),
+                            queryVector,
+                            adjustedK,
+                            numCands,
+                            filter,
+                            visitRatio,
+                            ivfQueryConfigResolver,
+                            RoutingFieldMapper.NAME,
+                            sliceIds
+                        );
+                } else {
+                    knnQuery = parentFilter != null
+                        ? new DiversifyingChildrenIVFKnnByteVectorQuery(
+                            name(),
+                            queryVector,
+                            adjustedK,
+                            numCands,
+                            filter,
+                            parentFilter,
+                            visitRatio,
+                            ivfQueryConfigResolver
+                        )
+                        : new IVFKnnByteVectorQuery(
+                            name(),
+                            queryVector,
+                            adjustedK,
+                            numCands,
+                            filter,
+                            visitRatio,
+                            ivfQueryConfigResolver
+                        );
+                }
             } else {
                 knnQuery = parentFilter != null
                     ? new ESDiversifyingChildrenByteKnnVectorQuery(

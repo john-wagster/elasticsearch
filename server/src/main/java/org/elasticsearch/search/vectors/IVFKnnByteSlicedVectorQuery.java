@@ -44,7 +44,7 @@ public class IVFKnnByteSlicedVectorQuery extends IVFKnnByteVectorQuery {
      * @param filter the filter to apply to the results
      * @param visitRatio the ratio of vectors to score for the IVF search strategy
      * @param sliceField the field used for slicing the index
-     * @param sliceId the slice to be searched
+     * @param sliceIds the slices to be searched
      */
     public IVFKnnByteSlicedVectorQuery(
         String field,
@@ -55,11 +55,11 @@ public class IVFKnnByteSlicedVectorQuery extends IVFKnnByteVectorQuery {
         float visitRatio,
         IvfQueryConfigResolver queryConfigResolver,
         String sliceField,
-        BytesRef sliceId
+        BytesRef... sliceIds
     ) {
         super(field, query, k, numCands, filter, visitRatio, queryConfigResolver);
         this.sliceField = Objects.requireNonNull(sliceField);
-        this.sliceId = Objects.requireNonNull(sliceId);
+        this.sliceId = Objects.requireNonNull(sliceIds[0]);
     }
 
     @Override
