@@ -92,6 +92,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     private static final Logger logger = LogManager.getLogger(ESNextDiskBBQVectorsWriter.class);
 
     private final int vectorPerCluster;
+    private final ESNextDiskBBQVectorsFormat.CentroidIndexFormat centroidIndexFormat;
     private final int centroidsPerParentCluster;
     private final ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding;
     private final TaskExecutor mergeExec;
@@ -108,6 +109,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         String rawVectorFormatName,
         boolean useDirectIOReads,
         FlatVectorsWriter rawVectorDelegate,
+        ESNextDiskBBQVectorsFormat.CentroidIndexFormat centroidIndexFormat,
         ESNextDiskBBQVectorsFormat.QuantEncoding encoding,
         int vectorPerCluster,
         int centroidsPerParentCluster,
@@ -134,6 +136,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             flatVectorThreshold
         );
         this.vectorPerCluster = vectorPerCluster;
+        this.centroidIndexFormat = centroidIndexFormat;
         this.centroidsPerParentCluster = centroidsPerParentCluster;
         this.quantEncoding = encoding;
         this.mergeExec = mergeExec;
@@ -164,13 +167,17 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     }
 
     protected IvfSegmentConfig beginIvfFieldFlush(FieldInfo fieldInfo) throws IOException {
-        IvfSegmentConfig codec = IvfSegmentConfig.fromCodecDefaults(quantEncoding, doPrecondition);
+        IvfSegmentConfig codec = IvfSegmentConfig.fromCodecDefaults(centroidIndexFormat, quantEncoding, doPrecondition);
         return flushConfigSource.load(segmentWriteState, fieldInfo).orElse(codec);
     }
 
     @Override
     protected IvfSegmentConfig beginIvfFieldMerge(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
-        return mergeConfigResolver.resolve(fieldInfo, mergeState, IvfSegmentConfig.fromCodecDefaults(quantEncoding, doPrecondition));
+        return mergeConfigResolver.resolve(
+            fieldInfo,
+            mergeState,
+            IvfSegmentConfig.fromCodecDefaults(centroidIndexFormat, quantEncoding, doPrecondition)
+        );
     }
 
     private static IvfSegmentConfig requireSegmentConfig(IvfSegmentConfig cfg) {
@@ -727,36 +734,6 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     }
 
     @Override
-    protected void doWriteMeta(
-        IndexOutput metaOutput,
-        FieldInfo field,
-        int numCentroids,
-        long preconditionerOffset,
-        long preconditionerLength,
-        int numberOfSlices,
-        int maxSliceSize,
-        IvfSegmentConfig ivfSegmentConfig
-    ) throws IOException {
-        final IvfSegmentConfig segmentConfig = requireSegmentConfig(ivfSegmentConfig);
-        metaOutput.writeInt(ES940OSQVectorsScorer.BULK_SIZE);
-        metaOutput.writeInt(segmentConfig.quantEncoding().id());
-        metaOutput.writeLong(preconditionerLength);
-        if (preconditionerLength > 0) {
-            metaOutput.writeLong(preconditionerOffset);
-        }
-        if (sliceField == null) {
-            assert numberOfSlices == 0;
-            metaOutput.writeInt(-1);
-        } else {
-            metaOutput.writeInt(numberOfSlices);
-            if (numberOfSlices > 0) {
-                metaOutput.writeVInt(maxSliceSize);
-            }
-        }
-        metaOutput.writeInt(Float.floatToIntBits(segmentConfig.rescoreOversample()));
-    }
-
-    @Override
     public void writeCentroids(
         FieldInfo fieldInfo,
         CentroidSupplier centroidSupplier,
@@ -1004,7 +981,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         return hierarchicalKMeans.cluster(floatVectorValues, centroidsPerParentCluster);
     }
 
-    // FIXME: need to account for byte[] vectors
+    // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
     private CentroidGroups buildCentroidGroups(KMeansResult<float[]> kMeansResult) {
         final int[] centroidVectorCount = new int[kMeansResult.centroids().length];
         for (int i = 0; i < kMeansResult.assignments().length; i++) {
@@ -1023,6 +1000,38 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         }
         return new CentroidGroups(kMeansResult.centroids(), vectorsPerCentroid, maxVectorsPerCentroidLength);
     }
+
+    @Override
+    protected void doWriteMeta(
+        IndexOutput metaOutput,
+        FieldInfo field,
+        int numCentroids,
+        long preconditionerOffset,
+        long preconditionerLength,
+        int numberOfSlices,
+        int maxSliceSize,
+        IvfSegmentConfig ivfSegmentConfig
+    ) throws IOException {
+        final IvfSegmentConfig segmentConfig = requireSegmentConfig(ivfSegmentConfig);
+        metaOutput.writeInt(ES940OSQVectorsScorer.BULK_SIZE);
+        metaOutput.writeInt(segmentConfig.centroidIndexFormat().id());
+        metaOutput.writeInt(segmentConfig.quantEncoding().id());
+        metaOutput.writeLong(preconditionerLength);
+        if (preconditionerLength > 0) {
+            metaOutput.writeLong(preconditionerOffset);
+        }
+        if (sliceField == null) {
+            assert numberOfSlices == 0;
+            metaOutput.writeInt(-1);
+        } else {
+            metaOutput.writeInt(numberOfSlices);
+            if (numberOfSlices > 0) {
+                metaOutput.writeVInt(maxSliceSize);
+            }
+        }
+        metaOutput.writeInt(Float.floatToIntBits(segmentConfig.rescoreOversample()));
+    }
+
 
     // FIXME: need to account for byte[] vectors
     @Override
