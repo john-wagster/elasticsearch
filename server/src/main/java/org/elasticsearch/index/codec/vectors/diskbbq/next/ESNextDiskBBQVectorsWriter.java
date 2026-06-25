@@ -1033,7 +1033,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     }
 
 
-    // FIXME: need to account for byte[] vectors
+    // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
     @Override
     @SuppressForbidden(reason = "require usage of Lucene's IOUtils#closeWhileHandlingException(...)")
     @SuppressWarnings({ "rawtypes", "unchecked" })
@@ -1102,7 +1102,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                 );
             }
 
-            // FIXME: need to account for byte[] vectors
+            // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
             HierarchicalKMeans<float[]> hierarchicalKMeans;
             if (mergeExec != null) {
                 hierarchicalKMeans = HierarchicalKMeans.ofConcurrent(
@@ -1114,7 +1114,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             } else {
                 hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
             }
-            // FIXME: need to account for byte[] vectors
+            // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
             KMeansResult<float[]> kMeansResult = action.execute(hierarchicalKMeans, floatVectorValues, vectorPerCluster);
             if (logger.isDebugEnabled()) {
                 int[] clusterSizes = new int[kMeansResult.centroids().length];
@@ -1136,7 +1136,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         }
     }
 
-    // FIXME: need to account for byte[] vectors
+    // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
     private CentroidAssignments<float[]> calculateCentroidsFullRebuildSliced(
         KMeansFloatVectorValues floatVectorValues,
         FieldInfo fieldInfo,
@@ -1145,7 +1145,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         // TODO: consider hinting / bootstrapping hierarchical kmeans with the prior segments centroids
         // TODO: for flush we are doing this over the vectors and here centroids which seems duplicative
         // preliminary tests suggest recall is good using only centroids but need to do further evaluation
-        // FIXME: need to account for byte[] vectors
+        // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
         HierarchicalKMeans<float[]> hierarchicalKMeans;
         if (mergeExec != null) {
             hierarchicalKMeans = HierarchicalKMeans.ofConcurrent(
@@ -1158,12 +1158,12 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         }
         if (sliceField == null) { // no slice
-            // FIXME: need to account for byte[] vectors
+            // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
             KMeansResult<float[]> kMeansResult = calculateCentroids(hierarchicalKMeans, floatVectorValues);
             if (logger.isDebugEnabled()) {
                 logger.debug("final centroid count: {}", kMeansResult.centroids().length);
             }
-            // FIXME: need to account for byte[] vectors
+            // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
             float[][] centroids = kMeansResult.centroids();
             int[] assignments = kMeansResult.assignments();
             int[] soarAssignments = kMeansResult.soarAssignments();
@@ -1186,7 +1186,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             // slice field must be dense populated, but we might have documents without a vector.
             final int[] sliceOffsets = new int[numSlices];
             final int[] sliceLengths = new int[numSlices];
-            // FIXME: need to account for byte[] vectors
+            // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
             List<KMeansResult<float[]>> kmeansResults = new ArrayList<>();
             for (int i = 0; i < numSlices; i++) {
                 if (iterator.docID() == DocIdSetIterator.NO_MORE_DOCS) {
@@ -1224,13 +1224,13 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                     j -> vectorOrdStart + j,
                     sliceNumVectors
                 );
-                // FIXME: need to account for byte[] vectors
+                // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
                 final KMeansResult<float[]> kMeansResult = calculateCentroids(hierarchicalKMeans, slice);
                 kmeansResults.add(kMeansResult);
                 sliceLengths[i] = sliceNumVectors;
                 sliceOffsets[i] = i == 0 ? kMeansResult.centroids().length : sliceOffsets[i - 1] + kMeansResult.centroids().length;
             }
-            // FIXME: need to account for byte[] vectors
+            // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
             final KMeansResult<float[]> merged = KMeansResult.merge(kmeansResults, CentroidOps.FLOAT);
             float[][] centroids = merged.centroids();
             int[] assignments = merged.assignments();
@@ -1291,7 +1291,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         }
     }
 
-    // FIXME: need to account for byte[] vectors
+    // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
     /**
      * Calculate the centroids for the given field.
      * We use the {@link HierarchicalKMeans} algorithm to partition the space of all vectors across merging segments
@@ -1308,13 +1308,13 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             // for sliced indexed, we don't cluster the data during flush so we can search our vectors by docId range
             return buildFlatCentroidAssignments(fieldInfo, floatVectorValues);
         }
-        // FIXME: need to account for byte[] vectors
+        // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         KMeansResult<float[]> kMeansResult = calculateCentroids(hierarchicalKMeans, floatVectorValues);
         if (logger.isDebugEnabled()) {
             logger.debug("final centroid count: {}", kMeansResult.centroids().length);
         }
-        // FIXME: need to account for byte[] vectors
+        // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
         float[][] centroids = kMeansResult.centroids();
         int[] assignments = kMeansResult.assignments();
         int[] soarAssignments = kMeansResult.soarAssignments();
@@ -1327,7 +1327,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         return new CentroidAssignments<>(fieldInfo.getVectorDimension(), centroids, assignments, soarAssignments);
     }
 
-    // FIXME: need to account for byte[] vectors
+    // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
     private KMeansResult<float[]> calculateCentroids(
         HierarchicalKMeans<float[]> hierarchicalKMeans,
         ClusteringFloatVectorValues floatVectorValues
@@ -1583,7 +1583,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                 throw new IllegalStateException("No more vectors to read, current ord: " + currOrd + ", count: " + count());
             }
             currOrd++;
-            // FIXME: need to account for byte[] vectors
+            // FIXME: byte merge path uses full-rebuild only; port tiered merge strategy to byte in a follow-up
             float[] vector = supplier.centroid(ordTransformer.apply(currOrd));
             corrections = quantizer.scalarQuantize(vector, floatVectorScratch, quantizedVectorScratch, (byte) 7, centroid);
             for (int i = 0; i < quantizedVectorScratch.length; i++) {
@@ -1631,7 +1631,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             this.currentParentCentroid = null;
         }
 
-        // FIXME: need to account for byte[] vectors ... all of the centroids probably need to be encapsulated in this code so they aren't float[] but instead a "Centroid" interface that can be either float[] or byte[]
+        // TODO: consider encapsulating centroid type (float[] vs byte[]) behind a unified interface in a follow-up
         private void reset(
             float[] centroid,
             byte[] byteCentroid,
