@@ -11,6 +11,7 @@ package org.elasticsearch.index.codec.vectors.diskbbq.next;
 
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.KnnVectorValues;
+import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.AcceptDocs;
 import org.apache.lucene.search.ConjunctionUtils;
@@ -263,7 +264,9 @@ class FlatCentroidIndex implements CentroidIndex {
         int bulkSize
     ) throws IOException {
         // build the three queues we are going to use
-        final long rawParentSize = (long) fieldInfo.getVectorDimension() * Float.BYTES;
+        boolean byteBacked = fieldInfo.getVectorEncoding() == VectorEncoding.BYTE
+            && fieldInfo.getVectorSimilarityFunction() != VectorSimilarityFunction.COSINE;
+        final long rawParentSize = (long) fieldInfo.getVectorDimension() * (byteBacked ? Byte.BYTES : Float.BYTES);
         final long centroidQuantizeSize = fieldInfo.getVectorDimension() + 3 * Float.BYTES + Integer.BYTES;
         final NeighborQueue parentsQueue = new NeighborQueue(numParents, true);
         final int maxChildrenSize = centroids.readVInt();

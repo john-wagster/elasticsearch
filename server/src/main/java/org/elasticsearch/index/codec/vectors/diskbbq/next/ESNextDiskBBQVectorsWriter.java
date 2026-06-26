@@ -1349,6 +1349,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     }
 
     @Override
+    @SuppressForbidden(reason = "require usage of Lucene's IOUtils#closeWhileHandlingException(...)")
     @SuppressWarnings({ "unchecked", "rawtypes" })
     public CentroidAssignments<byte[]> calculateByteCentroids(
         FieldInfo fieldInfo,
@@ -1361,79 +1362,83 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int[] segmentCentroidCounts = new int[numSegments];
         IVFVectorsReader.CentroidData<byte[]>[] segmentCentroidData = new IVFVectorsReader.CentroidData[numSegments];
 
-        for (int i = 0; i < numSegments; i++) {
-            KnnVectorsReader reader = mergeState.knnVectorsReaders[i];
-            if (reader instanceof PerFieldKnnVectorsFormat.FieldsReader perFieldReader) {
-                reader = perFieldReader.getFieldReader(fieldInfo.name);
-            }
-            if (reader instanceof IVFVectorsReader<?> ivfReader && mergeState.fieldInfos[i].fieldInfo(fieldInfo.name) != null) {
-                ByteVectorValues bvv = ivfReader.getByteVectorValues(fieldInfo.name);
-                segmentSizes[i] = bvv != null ? bvv.size() : 0;
-                CentroidData<?> data = ivfReader.readCentroidData(fieldInfo.name);
-                // Only use centroid data if it was byte-backed (non-COSINE byte fields stored as bytes).
-                // COSINE byte fields store centroids as float, so they won't work for the byte tiered path.
-                if (data != null && data.centroids() instanceof ClusteringByteVectorValues) {
-                    segmentCentroidData[i] = (IVFVectorsReader.CentroidData<byte[]>) (IVFVectorsReader.CentroidData) data;
-                    segmentCentroidCounts[i] = data.numCentroids();
+        try {
+            for (int i = 0; i < numSegments; i++) {
+                KnnVectorsReader reader = mergeState.knnVectorsReaders[i];
+                if (reader instanceof PerFieldKnnVectorsFormat.FieldsReader perFieldReader) {
+                    reader = perFieldReader.getFieldReader(fieldInfo.name);
+                }
+                if (reader instanceof IVFVectorsReader<?> ivfReader && mergeState.fieldInfos[i].fieldInfo(fieldInfo.name) != null) {
+                    ByteVectorValues bvv = ivfReader.getByteVectorValues(fieldInfo.name);
+                    segmentSizes[i] = bvv != null ? bvv.size() : 0;
+                    CentroidData<?> data = ivfReader.readCentroidData(fieldInfo.name);
+                    // Only use centroid data if it was byte-backed (non-COSINE byte fields stored as bytes).
+                    // COSINE byte fields store centroids as float, so they won't work for the byte tiered path.
+                    if (data != null && data.centroids() instanceof ClusteringByteVectorValues) {
+                        segmentCentroidData[i] = (IVFVectorsReader.CentroidData<byte[]>) (IVFVectorsReader.CentroidData) data;
+                        segmentCentroidCounts[i] = data.numCentroids();
+                    } else {
+                        segmentCentroidCounts[i] = 0;
+                    }
                 } else {
+                    segmentSizes[i] = 0;
                     segmentCentroidCounts[i] = 0;
                 }
+            }
+
+            // Select merge strategy
+            TieredMergeStrategy<byte[]> tieredStrategy = new TieredMergeStrategy<>(vectorPerCluster, CentroidOps.BYTE);
+            TieredMergeStrategy.MergeAction<byte[]> action = tieredStrategy.selectAction(
+                segmentSizes,
+                segmentCentroidCounts,
+                segmentCentroidData
+            );
+
+            if (logger.isDebugEnabled()) {
+                int totalVectors = 0;
+                int totalCentroids = 0;
+                for (int s : segmentSizes) {
+                    totalVectors += s;
+                }
+                for (int c : segmentCentroidCounts) {
+                    totalCentroids += c;
+                }
+                logger.debug(
+                    "DiskBBQ byte merge for field [{}]: selected strategy [{}], segments={}, totalVectors={}, totalCentroids={}",
+                    fieldInfo.name,
+                    action.strategy(),
+                    numSegments,
+                    totalVectors,
+                    totalCentroids
+                );
+            }
+
+            HierarchicalKMeans<byte[]> hierarchicalKMeans;
+            if (mergeExec != null) {
+                hierarchicalKMeans = HierarchicalKMeans.ofConcurrent(
+                    CentroidOps.BYTE,
+                    byteVectorValues.dimension(),
+                    mergeExec,
+                    numMergeWorkers
+                );
             } else {
-                segmentSizes[i] = 0;
-                segmentCentroidCounts[i] = 0;
+                hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.BYTE, byteVectorValues.dimension());
             }
-        }
-
-        // Select merge strategy
-        TieredMergeStrategy<byte[]> tieredStrategy = new TieredMergeStrategy<>(vectorPerCluster, CentroidOps.BYTE);
-        TieredMergeStrategy.MergeAction<byte[]> action = tieredStrategy.selectAction(
-            segmentSizes,
-            segmentCentroidCounts,
-            segmentCentroidData
-        );
-
-        if (logger.isDebugEnabled()) {
-            int totalVectors = 0;
-            int totalCentroids = 0;
-            for (int s : segmentSizes) {
-                totalVectors += s;
+            KMeansResult<byte[]> kMeansResult = action.execute(hierarchicalKMeans, byteVectorValues, vectorPerCluster);
+            if (logger.isDebugEnabled()) {
+                logger.debug("final byte centroid count: {}", kMeansResult.centroids().length);
             }
-            for (int c : segmentCentroidCounts) {
-                totalCentroids += c;
+            byte[][] centroids = kMeansResult.centroids();
+            int[] assignments = kMeansResult.assignments();
+            int[] soarAssignments = kMeansResult.soarAssignments();
+            VectorSimilarityFunction sim = fieldInfo.getVectorSimilarityFunction();
+            if (sim == VectorSimilarityFunction.DOT_PRODUCT || sim == VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT) {
+                scaleByteCentroidsToAverageMagnitude(centroids, assignments, byteVectorValues);
             }
-            logger.debug(
-                "DiskBBQ byte merge for field [{}]: selected strategy [{}], segments={}, totalVectors={}, totalCentroids={}",
-                fieldInfo.name,
-                action.strategy(),
-                numSegments,
-                totalVectors,
-                totalCentroids
-            );
+            return CentroidAssignments.ofBytes(fieldInfo.getVectorDimension(), centroids, assignments, soarAssignments);
+        } finally {
+            org.apache.lucene.util.IOUtils.closeWhileHandlingException(segmentCentroidData);
         }
-
-        HierarchicalKMeans<byte[]> hierarchicalKMeans;
-        if (mergeExec != null) {
-            hierarchicalKMeans = HierarchicalKMeans.ofConcurrent(
-                CentroidOps.BYTE,
-                byteVectorValues.dimension(),
-                mergeExec,
-                numMergeWorkers
-            );
-        } else {
-            hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.BYTE, byteVectorValues.dimension());
-        }
-        KMeansResult<byte[]> kMeansResult = action.execute(hierarchicalKMeans, byteVectorValues, vectorPerCluster);
-        if (logger.isDebugEnabled()) {
-            logger.debug("final byte centroid count: {}", kMeansResult.centroids().length);
-        }
-        byte[][] centroids = kMeansResult.centroids();
-        int[] assignments = kMeansResult.assignments();
-        int[] soarAssignments = kMeansResult.soarAssignments();
-        VectorSimilarityFunction sim = fieldInfo.getVectorSimilarityFunction();
-        if (sim == VectorSimilarityFunction.DOT_PRODUCT || sim == VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT) {
-            scaleByteCentroidsToAverageMagnitude(centroids, assignments, byteVectorValues);
-        }
-        return CentroidAssignments.ofBytes(fieldInfo.getVectorDimension(), centroids, assignments, soarAssignments);
     }
 
     /**
