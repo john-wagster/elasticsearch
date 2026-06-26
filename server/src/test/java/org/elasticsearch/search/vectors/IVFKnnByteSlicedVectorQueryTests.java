@@ -93,7 +93,7 @@ public class IVFKnnByteSlicedVectorQueryTests extends LuceneTestCase {
                     SLICE_FIELD,
                     querySlice
                 );
-                assertEquals("IVFKnnByteSlicedVectorQuery:field[0,...][10][" + SLICE_FIELD + "=0]", query.toString("ignored"));
+                assertEquals("IVFKnnByteSlicedVectorQuery:field[0,...][10][" + SLICE_FIELD + "=[0]]", query.toString("ignored"));
 
                 // test with filter
                 Query filter = new TermQuery(new Term("id", "text"));
@@ -113,7 +113,7 @@ public class IVFKnnByteSlicedVectorQueryTests extends LuceneTestCase {
                     SLICE_FIELD,
                     querySlice
                 );
-                assertEquals("IVFKnnByteSlicedVectorQuery:field[0,...][10][" + SLICE_FIELD + "=0][id:text]", query.toString("ignored"));
+                assertEquals("IVFKnnByteSlicedVectorQuery:field[0,...][10][" + SLICE_FIELD + "=[0]][id:text]", query.toString("ignored"));
             }
         }
     }
@@ -265,6 +265,118 @@ public class IVFKnnByteSlicedVectorQueryTests extends LuceneTestCase {
                     TopDocs topDocs = searcher.search(kvq, 3);
                     assertEquals(0, topDocs.scoreDocs.length);
                 }
+            }
+        }
+    }
+
+    /**
+     * Tests that querying multiple slices at once returns results from all requested slices.
+     */
+    public void testMultiSlice() throws IOException {
+        int dimensions = random().nextInt(12, 128);
+        int numDocs = random().nextInt(200, 2000);
+        int numSlices = random().nextInt(3, 8);
+        int[] docsPerSlice = new int[numSlices];
+        IndexWriterConfig iwc = newIndexWriterConfig();
+        iwc.setIndexSort(new Sort(new SortField(SLICE_FIELD, SortField.Type.STRING)));
+        iwc.setCodec(TestUtil.alwaysKnnVectorsFormat(format));
+
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, iwc)) {
+            for (int i = 0; i < numDocs; i++) {
+                int slice = random().nextInt(numSlices);
+                Document doc = new Document();
+                doc.add(SortedDocValuesField.indexedField(SLICE_FIELD, new BytesRef("" + slice)));
+                doc.add(new KnnByteVectorField("vector", randomByteVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                doc.add(new StoredField(SLICE_FIELD, new BytesRef("" + slice)));
+                docsPerSlice[slice]++;
+                w.addDocument(doc);
+            }
+            w.commit();
+            byte[] queryVector = randomByteVector(dimensions);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                IndexSearcher searcher = new IndexSearcher(reader);
+                // Query two slices at once
+                int sliceA = 0;
+                int sliceB = Math.min(1, numSlices - 1);
+                int expectedTotal = docsPerSlice[sliceA] + (sliceA != sliceB ? docsPerSlice[sliceB] : 0);
+                int k = 2 * Math.max(1, expectedTotal);
+                Query kvq = new IVFKnnByteSlicedVectorQuery(
+                    "vector",
+                    queryVector,
+                    k,
+                    k,
+                    null,
+                    1.0f,
+                    new TestIvfQueryConfigResolver(
+                        ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
+                        ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                        false,
+                        1.0f
+                    ),
+                    SLICE_FIELD,
+                    new BytesRef("" + sliceA),
+                    new BytesRef("" + sliceB)
+                );
+                TopDocs topDocs = searcher.search(kvq, k);
+                assertEquals(expectedTotal, topDocs.scoreDocs.length);
+                // Verify all results come from the requested slices
+                for (int i = 0; i < topDocs.scoreDocs.length; i++) {
+                    Document document = reader.storedFields().document(topDocs.scoreDocs[i].doc);
+                    String sliceValue = document.getField(SLICE_FIELD).binaryValue().utf8ToString();
+                    assertTrue(
+                        "Expected slice " + sliceA + " or " + sliceB + " but got " + sliceValue,
+                        sliceValue.equals("" + sliceA) || sliceValue.equals("" + sliceB)
+                    );
+                }
+            }
+        }
+    }
+
+    /**
+     * Tests that querying with an empty sliceIds array searches all slices (returns all vectors).
+     */
+    public void testAllSlices() throws IOException {
+        int dimensions = random().nextInt(12, 128);
+        int numDocs = random().nextInt(200, 2000);
+        int numSlices = random().nextInt(3, 8);
+        int totalWithVector = 0;
+        IndexWriterConfig iwc = newIndexWriterConfig();
+        iwc.setIndexSort(new Sort(new SortField(SLICE_FIELD, SortField.Type.STRING)));
+        iwc.setCodec(TestUtil.alwaysKnnVectorsFormat(format));
+
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, iwc)) {
+            for (int i = 0; i < numDocs; i++) {
+                int slice = random().nextInt(numSlices);
+                Document doc = new Document();
+                doc.add(SortedDocValuesField.indexedField(SLICE_FIELD, new BytesRef("" + slice)));
+                doc.add(new KnnByteVectorField("vector", randomByteVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                doc.add(new StoredField(SLICE_FIELD, new BytesRef("" + slice)));
+                totalWithVector++;
+                w.addDocument(doc);
+            }
+            w.commit();
+            byte[] queryVector = randomByteVector(dimensions);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                IndexSearcher searcher = new IndexSearcher(reader);
+                int k = 2 * Math.max(1, totalWithVector);
+                // Empty sliceIds = search all slices
+                Query kvq = new IVFKnnByteSlicedVectorQuery(
+                    "vector",
+                    queryVector,
+                    k,
+                    k,
+                    null,
+                    1.0f,
+                    new TestIvfQueryConfigResolver(
+                        ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
+                        ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                        false,
+                        1.0f
+                    ),
+                    SLICE_FIELD
+                );
+                TopDocs topDocs = searcher.search(kvq, k);
+                assertEquals(totalWithVector, topDocs.scoreDocs.length);
             }
         }
     }

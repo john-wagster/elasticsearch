@@ -10,7 +10,6 @@
 package org.elasticsearch.index.codec.vectors.diskbbq.next;
 
 import org.apache.lucene.index.FieldInfo;
-import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.VectorEncoding;
@@ -481,7 +480,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 entry,
                 fieldInfo,
                 needsScoring,
-                (FloatVectorValues) values,
+                values,
                 startDoc,
                 endDoc
             );
@@ -596,7 +595,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
     private static class SlicedMemorySegmentPostingsVisitor extends MemorySegmentPostingsVisitor {
         final int startDocId;
         final int endDocId;
-        final FloatVectorValues floatVectorValues;
+        final KnnVectorValues vectorValues;
 
         SlicedMemorySegmentPostingsVisitor(
             QueryQuantizer queryQuantizer,
@@ -605,21 +604,21 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             FieldEntry entry,
             FieldInfo fieldInfo,
             Bits acceptDocs,
-            FloatVectorValues values,
+            KnnVectorValues values,
             int startDocId,
             int endDocId
         ) throws IOException {
             super(queryQuantizer, quantEncoding, indexInput, entry, fieldInfo, acceptDocs);
             this.startDocId = startDocId;
             this.endDocId = endDocId;
-            this.floatVectorValues = values;
+            this.vectorValues = values;
         }
 
         @Override
         public int resetPostingsScorer(PostingMetadata metadata) throws IOException {
             int totalVectors = super.resetPostingsScorer(metadata);
             int totalBlocks = totalVectors / BULK_SIZE;
-            KnnVectorValues.DocIndexIterator iterator = floatVectorValues.iterator();
+            KnnVectorValues.DocIndexIterator iterator = vectorValues.iterator();
             if (iterator.advance(startDocId) >= endDocId) {
                 this.vectors = 0;
                 return 0;
@@ -628,7 +627,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             int docId = iterator.advance(endDocId);
             int maxOrd;
             if (docId == DocIdSetIterator.NO_MORE_DOCS) {
-                maxOrd = floatVectorValues.size();
+                maxOrd = vectorValues.size();
             } else {
                 maxOrd = iterator.index();
             }
@@ -662,7 +661,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         @Override
         protected void readDocIds(int count) {
             for (int j = 0; j < count; j++) {
-                int docId = floatVectorValues.ordToDoc(docBase++);
+                int docId = vectorValues.ordToDoc(docBase++);
                 if (docId >= startDocId && docId < endDocId) {
                     docIdsScratch[j] = docId;
                 } else {
