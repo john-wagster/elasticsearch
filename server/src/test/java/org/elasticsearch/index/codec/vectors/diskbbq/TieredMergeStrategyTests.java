@@ -28,12 +28,7 @@ public class TieredMergeStrategyTests extends ESTestCase {
         // One segment has 80% of vectors — insertion keeps dominant centroids with minimal iteration
         int[] sizes = { 8000, 500, 500, 500, 500 };
         int[] centroids = { 120, 8, 8, 8, 8 };
-        TieredMergeStrategy.MergeAction<float[]> action = assertAction(
-            strategy,
-            sizes,
-            centroids,
-            TieredMergeStrategy.Strategy.INSERTION
-        );
+        TieredMergeStrategy.MergeAction<float[]> action = assertAction(strategy, sizes, centroids, TieredMergeStrategy.Strategy.INSERTION);
         assertTrue(action instanceof TieredMergeStrategy.Insertion<float[]>);
         // Dominant segment (index 0) centroids should be captured
         assertEquals(120, ((TieredMergeStrategy.Insertion<float[]>) action).seedCentroids().size());

@@ -343,14 +343,8 @@ public class HierarchicalKMeans<V> {
      * still applies even when the candidate vectors are off-heap. The window must be sized
      * {@code V[4]} with each element having length {@code candidates.dimension()}.
      */
-    private void forEachSquareDistance(
-        V query,
-        ClusteringVectorValues<V> candidates,
-        int from,
-        int to,
-        V[] window,
-        DistanceVisitor visitor
-    ) throws IOException {
+    private void forEachSquareDistance(V query, ClusteringVectorValues<V> candidates, int from, int to, V[] window, DistanceVisitor visitor)
+        throws IOException {
         assert window.length == 4;
         final float[] buf = new float[4];
         final int bulkLimit = to - 3;
@@ -793,11 +787,8 @@ public class HierarchicalKMeans<V> {
      * @param targetSize       target number of vectors per cluster
      * @return clustering result with assignments and SOAR assignments
      */
-    public KMeansResult<V> clusterByInsertion(
-        ClusteringVectorValues<V> vectors,
-        ClusteringVectorValues<V> initialCentroids,
-        int targetSize
-    ) throws IOException {
+    public KMeansResult<V> clusterByInsertion(ClusteringVectorValues<V> vectors, ClusteringVectorValues<V> initialCentroids, int targetSize)
+        throws IOException {
         if (vectors.size() == 0) {
             return KMeansIntermediate.empty(ops);
         }

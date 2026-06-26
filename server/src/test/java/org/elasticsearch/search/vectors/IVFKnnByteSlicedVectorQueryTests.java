@@ -84,7 +84,12 @@ public class IVFKnnByteSlicedVectorQueryTests extends LuceneTestCase {
                     10,
                     null,
                     1.0f,
-                    new TestIvfQueryConfigResolver(ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT, ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, false, 1.0f),
+                    new TestIvfQueryConfigResolver(
+                        ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
+                        ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                        false,
+                        1.0f
+                    ),
                     SLICE_FIELD,
                     querySlice
                 );
@@ -99,7 +104,12 @@ public class IVFKnnByteSlicedVectorQueryTests extends LuceneTestCase {
                     10,
                     filter,
                     1.0f,
-                    new TestIvfQueryConfigResolver(ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT, ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, false, 1.0f),
+                    new TestIvfQueryConfigResolver(
+                        ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
+                        ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                        false,
+                        1.0f
+                    ),
                     SLICE_FIELD,
                     querySlice
                 );
@@ -216,7 +226,12 @@ public class IVFKnnByteSlicedVectorQueryTests extends LuceneTestCase {
                             k,
                             filterQuery,
                             1.0f,
-                            new TestIvfQueryConfigResolver(ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT, ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, false, 1.0f),
+                            new TestIvfQueryConfigResolver(
+                                ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
+                                ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                                false,
+                                1.0f
+                            ),
                             SLICE_FIELD,
                             new BytesRef("" + slice)
                         );
@@ -238,7 +253,12 @@ public class IVFKnnByteSlicedVectorQueryTests extends LuceneTestCase {
                         3,
                         filterQuery,
                         1.0f,
-                        new TestIvfQueryConfigResolver(ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT, ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, false, 1.0f),
+                        new TestIvfQueryConfigResolver(
+                            ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
+                            ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                            false,
+                            1.0f
+                        ),
                         SLICE_FIELD,
                         new BytesRef("invalid")
                     );

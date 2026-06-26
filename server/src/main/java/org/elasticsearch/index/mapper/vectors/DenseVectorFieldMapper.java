@@ -3382,15 +3382,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                             visitRatio,
                             ivfQueryConfigResolver
                         )
-                        : new IVFKnnByteVectorQuery(
-                            name(),
-                            queryVector,
-                            adjustedK,
-                            numCands,
-                            filter,
-                            visitRatio,
-                            ivfQueryConfigResolver
-                        );
+                        : new IVFKnnByteVectorQuery(name(), queryVector, adjustedK, numCands, filter, visitRatio, ivfQueryConfigResolver);
                 }
             } else {
                 knnQuery = parentFilter != null

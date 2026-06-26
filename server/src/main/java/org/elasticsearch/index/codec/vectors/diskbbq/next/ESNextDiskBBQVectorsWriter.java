@@ -14,9 +14,9 @@ import org.apache.lucene.codecs.DocValuesProducer;
 import org.apache.lucene.codecs.KnnVectorsReader;
 import org.apache.lucene.codecs.hnsw.FlatVectorsWriter;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
+import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInfo;
-import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.MergeState;
@@ -1031,12 +1031,14 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         metaOutput.writeInt(Float.floatToIntBits(segmentConfig.rescoreOversample()));
     }
 
-
     @Override
     @SuppressForbidden(reason = "require usage of Lucene's IOUtils#closeWhileHandlingException(...)")
     @SuppressWarnings({ "rawtypes", "unchecked" })
-    public CentroidAssignments<float[]> calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues, MergeState mergeState)
-        throws IOException {
+    public CentroidAssignments<float[]> calculateCentroids(
+        FieldInfo fieldInfo,
+        KMeansFloatVectorValues floatVectorValues,
+        MergeState mergeState
+    ) throws IOException {
         // Sliced indices treat each slice as an independent partition that must be clustered on its
         // own. The tiered merge strategy operates on the merged segment as a flat whole, which would
         // silently collapse slice boundaries, so always fall back to the sliced full rebuild here.
@@ -1384,7 +1386,11 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
         // Select merge strategy
         TieredMergeStrategy<byte[]> tieredStrategy = new TieredMergeStrategy<>(vectorPerCluster, CentroidOps.BYTE);
-        TieredMergeStrategy.MergeAction<byte[]> action = tieredStrategy.selectAction(segmentSizes, segmentCentroidCounts, segmentCentroidData);
+        TieredMergeStrategy.MergeAction<byte[]> action = tieredStrategy.selectAction(
+            segmentSizes,
+            segmentCentroidCounts,
+            segmentCentroidData
+        );
 
         if (logger.isDebugEnabled()) {
             int totalVectors = 0;
