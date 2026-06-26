@@ -251,6 +251,12 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
     /** Convenience constant for the byte ops singleton. */
     CentroidOps<byte[]> BYTE = ByteOps.INSTANCE;
 
+    /**
+     * Concatenates multiple {@link ClusteringVectorValues} instances into a single view.
+     * Used by the tiered merge strategy to combine centroids from multiple segments.
+     */
+    ClusteringVectorValues<V> concatenate(ClusteringVectorValues<V>[] parts);
+
     // ---- Implementations ----
 
     /**
@@ -476,6 +482,16 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
                     // no-op
                 }
             };
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public ClusteringVectorValues<float[]> concatenate(ClusteringVectorValues<float[]>[] parts) {
+            ClusteringFloatVectorValues[] floatParts = new ClusteringFloatVectorValues[parts.length];
+            for (int i = 0; i < parts.length; i++) {
+                floatParts[i] = (ClusteringFloatVectorValues) parts[i];
+            }
+            return new ConcatenatedClusteringFloatVectorValues(floatParts);
         }
     }
 
@@ -749,6 +765,16 @@ public sealed interface CentroidOps<V> permits CentroidOps.FloatOps, CentroidOps
             for (int d = 0; d < dim; d++) {
                 byteCentroid[d] = (byte) Math.clamp(Math.round(floatBuffer[d]), -128, 127);
             }
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public ClusteringVectorValues<byte[]> concatenate(ClusteringVectorValues<byte[]>[] parts) {
+            ClusteringByteVectorValues[] byteParts = new ClusteringByteVectorValues[parts.length];
+            for (int i = 0; i < parts.length; i++) {
+                byteParts[i] = (ClusteringByteVectorValues) parts[i];
+            }
+            return new ConcatenatedClusteringByteVectorValues(byteParts);
         }
 
     }
