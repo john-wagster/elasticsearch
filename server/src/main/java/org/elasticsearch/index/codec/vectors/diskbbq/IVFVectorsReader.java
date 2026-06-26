@@ -682,7 +682,8 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
         private final float[] globalCentroid;
         private final IndexInput backing;
 
-        // FIXME: usages of CentroidData need to created with the correct type for V either float[] or byte[] or we need to encapsulate the type in CentroidData
+        // Note: ESNextDiskBBQVectorsReader.readCentroidData() handles type dispatch (float vs byte) correctly.
+        // Other reader implementations (ES940, ES920) should follow the same pattern if they add byte support.
         public CentroidData(ClusteringVectorValues<V> centroids, int[] clusterSizes, float[] globalCentroid, IndexInput backing) {
             assert centroids.size() == clusterSizes.length;
             this.numCentroids = centroids.size();
