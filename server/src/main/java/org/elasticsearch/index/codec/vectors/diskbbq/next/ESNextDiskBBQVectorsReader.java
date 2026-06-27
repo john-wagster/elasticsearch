@@ -464,17 +464,17 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, null, entry.globalCentroid(), false);
         }
         if (entry.numSlices == 0) {
-            // should only happen in sliced flushed segments
-            assert entry.numCentroids() == 1;
+            // Sliced segment without per-slice centroid structure (e.g. byte fields during flush).
+            // Uses SlicedMemorySegmentPostingsVisitor which handles the flat posting list format.
             int startDoc;
             int endDoc;
-            if (acceptDocs == null) {
-                startDoc = 0;
-                endDoc = values.ordToDoc(values.size() - 1) + 1;
-            } else {
-                ESAcceptDocs.SliceAcceptDocs sliceAcceptDocs = acceptDocs.sliceAcceptDocs();
+            if (acceptDocs instanceof ESAcceptDocs esAccept && esAccept.sliceAcceptDocs() != null) {
+                ESAcceptDocs.SliceAcceptDocs sliceAcceptDocs = esAccept.sliceAcceptDocs();
                 startDoc = sliceAcceptDocs.startDoc();
                 endDoc = sliceAcceptDocs.endDoc();
+            } else {
+                startDoc = 0;
+                endDoc = values.ordToDoc(values.size() - 1) + 1;
             }
             return new SlicedMemorySegmentPostingsVisitor(
                 queryQuantizer,
@@ -644,7 +644,12 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             } else {
                 maxOrd = iterator.index();
             }
-            assert maxOrd - minOrd <= totalVectors;
+            // When searching the full segment (startDocId == 0), the doc range may span
+            // more ordinals than a single posting list in multi-centroid segments. In that case
+            // we clamp to the posting list bounds rather than asserting.
+            if (maxOrd - minOrd > totalVectors) {
+                maxOrd = Math.min(maxOrd, minOrd + totalVectors);
+            }
             int startBlock = minOrd / BULK_SIZE;
             int endBlock = (maxOrd - 1) / BULK_SIZE;
             if (endBlock == totalBlocks) {

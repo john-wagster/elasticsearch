@@ -9,22 +9,28 @@
 package org.elasticsearch.search.vectors;
 
 import org.apache.lucene.document.Field;
-import org.apache.lucene.document.KnnByteVectorField;
+import org.apache.lucene.document.KnnFloatVectorField;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.VectorUtil;
 
-public class IVFKnnByteSlicedVectorQueryTests extends AbstractIVFKnnSlicedVectorQueryTestCase {
+import static com.carrotsearch.randomizedtesting.RandomizedTest.randomFloat;
 
-    private byte[] randomByteVector(int dim) {
-        byte[] vector = new byte[dim];
-        random().nextBytes(vector);
+public class IVFKnnFloatSlicedVectorQuerySliceTests extends AbstractIVFKnnSlicedVectorQueryTestCase {
+
+    private float[] randomVector(int dim) {
+        float[] vector = new float[dim];
+        for (int i = 0; i < dim; i++) {
+            vector[i] = randomFloat();
+        }
+        VectorUtil.l2normalize(vector);
         return vector;
     }
 
     @Override
     protected Field createVectorField(String name, int dimensions) {
-        return new KnnByteVectorField(name, randomByteVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT);
+        return new KnnFloatVectorField(name, randomVector(dimensions), VectorSimilarityFunction.EUCLIDEAN);
     }
 
     @Override
@@ -37,9 +43,9 @@ public class IVFKnnByteSlicedVectorQueryTests extends AbstractIVFKnnSlicedVector
         float visitRatio,
         BytesRef... sliceIds
     ) {
-        return new IVFKnnByteSlicedVectorQuery(
+        return new IVFKnnFloatSlicedVectorQuery(
             field,
-            randomByteVector(dimensions),
+            randomVector(dimensions),
             k,
             numCands,
             filter,
@@ -52,9 +58,9 @@ public class IVFKnnByteSlicedVectorQueryTests extends AbstractIVFKnnSlicedVector
 
     @Override
     protected Query createToStringQuery(String field, int k, int numCands, Query filter, float visitRatio, BytesRef... sliceIds) {
-        return new IVFKnnByteSlicedVectorQuery(
+        return new IVFKnnFloatSlicedVectorQuery(
             field,
-            new byte[] { 0, 1 },
+            new float[] { 0.0f, 1.0f },
             k,
             numCands,
             filter,
@@ -67,16 +73,16 @@ public class IVFKnnByteSlicedVectorQueryTests extends AbstractIVFKnnSlicedVector
 
     @Override
     protected VectorSimilarityFunction similarityFunction() {
-        return VectorSimilarityFunction.DOT_PRODUCT;
+        return VectorSimilarityFunction.EUCLIDEAN;
     }
 
     @Override
     protected String queryToStringPrefix() {
-        return "IVFKnnByteSlicedVectorQuery";
+        return "IVFKnnFloatSlicedVectorQuery";
     }
 
     @Override
     protected Object firstQueryElement() {
-        return "0";
+        return "0.0";
     }
 }

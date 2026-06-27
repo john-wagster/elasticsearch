@@ -42,8 +42,10 @@ import java.util.function.LongSupplier;
  */
 public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
 
+    // package-private for IVFKnnByteSlicedVectorQuery access
     final byte[] query;
     private boolean isQueryPreconditioned = false;
+    // package-private for IVFKnnByteSlicedVectorQuery access
     float[] preconditionedQuery = null;
 
     /**
