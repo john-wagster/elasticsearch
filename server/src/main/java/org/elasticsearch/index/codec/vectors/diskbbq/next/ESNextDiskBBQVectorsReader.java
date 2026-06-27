@@ -451,14 +451,17 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         if (numParents > 0) {
             // unused
             int longestPostingList = centroidSlice.readVInt();
+            boolean parentsByteBacked = fieldInfo.getVectorEncoding() == VectorEncoding.BYTE
+                && fieldInfo.getVectorSimilarityFunction() != VectorSimilarityFunction.COSINE;
+            int bytesPerComponent = parentsByteBacked ? Byte.BYTES : Float.BYTES;
             IndexInput parentsSlice = centroidSlice.slice(
                 "parents-slice",
                 centroidSlice.getFilePointer(),
-                (long) numParents * fieldInfo.getVectorDimension() * Float.BYTES
+                (long) numParents * fieldInfo.getVectorDimension() * bytesPerComponent
             );
-            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, parentsSlice, entry.globalCentroid());
+            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, parentsSlice, entry.globalCentroid(), parentsByteBacked);
         } else {
-            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, null, entry.globalCentroid());
+            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, null, entry.globalCentroid(), false);
         }
         if (entry.numSlices == 0) {
             // should only happen in sliced flushed segments
@@ -504,6 +507,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         private final IndexInput parentsSlice;
         private final float[] globalCentroid;
         private final float[] centroidScratch;
+        private final boolean byteBacked;
         private int currentCentroidOrdinal = -2;
         private int nextCentroidOrdinal = -1;
         private byte[] evictedQuantizedQuery = null;
@@ -514,7 +518,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             FieldInfo fieldInfo,
             float[] target,
             IndexInput parentsSlice,
-            float[] globalCentroid
+            float[] globalCentroid,
+            boolean byteBacked
         ) {
             this.quantEncoding = quantEncoding;
             this.target = target;
@@ -524,6 +529,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             this.quantizer = new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction(), DEFAULT_LAMBDA, 1);
             this.parentsSlice = parentsSlice;
             this.globalCentroid = globalCentroid;
+            this.byteBacked = byteBacked;
             this.cache = new LinkedHashMap<>(QUERY_CACHE_SIZE, 0.75f, true) {
                 @Override
                 protected boolean removeEldestEntry(Map.Entry<Integer, QueryQuantizerResult> eldest) {
@@ -556,8 +562,15 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 final float[] queryCentroid;
                 if (parentsSlice != null) {
                     assert nextCentroidOrdinal >= 0;
-                    parentsSlice.seek((long) nextCentroidOrdinal * centroidScratch.length * Float.BYTES);
-                    parentsSlice.readFloats(centroidScratch, 0, centroidScratch.length);
+                    if (byteBacked) {
+                        parentsSlice.seek((long) nextCentroidOrdinal * centroidScratch.length);
+                        for (int d = 0; d < centroidScratch.length; d++) {
+                            centroidScratch[d] = parentsSlice.readByte();
+                        }
+                    } else {
+                        parentsSlice.seek((long) nextCentroidOrdinal * centroidScratch.length * Float.BYTES);
+                        parentsSlice.readFloats(centroidScratch, 0, centroidScratch.length);
+                    }
                     queryCentroid = centroidScratch;
                 } else {
                     assert nextCentroidOrdinal == NO_ORDINAL;
