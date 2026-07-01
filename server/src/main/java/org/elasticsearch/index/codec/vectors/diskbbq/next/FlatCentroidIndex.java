@@ -19,6 +19,7 @@ import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.LongValues;
+import org.apache.lucene.util.VectorUtil;
 import org.apache.lucene.util.packed.DirectReader;
 import org.apache.lucene.util.packed.DirectWriter;
 import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
@@ -74,12 +75,17 @@ class FlatCentroidIndex implements CentroidIndex {
         bulkSize = fieldEntry.getBulkSize();
         OptimizedScalarQuantizer scalarQuantizer = new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction());
         int[] scratch = new int[targetQuery.length];
+        float[] globalCentroid = fieldEntry.globalCentroid();
+        if (fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE) {
+            globalCentroid = globalCentroid.clone();
+            VectorUtil.l2normalize(globalCentroid);
+        }
         queryParams = scalarQuantizer.scalarQuantize(
             targetQuery,
             new float[targetQuery.length],
             scratch,
             (byte) 7,
-            fieldEntry.globalCentroid()
+            globalCentroid
         );
         quantized = new byte[targetQuery.length];
         for (int i = 0; i < quantized.length; i++) {

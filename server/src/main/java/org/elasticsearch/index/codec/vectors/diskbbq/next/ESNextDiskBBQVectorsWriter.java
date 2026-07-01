@@ -1065,13 +1065,13 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                     reader = perFieldReader.getFieldReader(fieldInfo.name);
                 }
                 if (reader instanceof IVFVectorsReader<?> ivfReader && mergeState.fieldInfos[i].fieldInfo(fieldInfo.name) != null) {
-                    // Get segment size — byte-encoded fields may not have float vector values
-                    FloatVectorValues fvv = ivfReader.getFloatVectorValues(fieldInfo.name);
-                    if (fvv != null) {
-                        segmentSizes[i] = fvv.size();
-                    } else {
+                    // Get segment size — use the appropriate vector values accessor based on encoding
+                    if (fieldInfo.getVectorEncoding() == VectorEncoding.BYTE) {
                         ByteVectorValues bvv = ivfReader.getByteVectorValues(fieldInfo.name);
                         segmentSizes[i] = bvv != null ? bvv.size() : 0;
+                    } else {
+                        FloatVectorValues fvv = ivfReader.getFloatVectorValues(fieldInfo.name);
+                        segmentSizes[i] = fvv != null ? fvv.size() : 0;
                     }
                     @SuppressWarnings("unchecked")
                     CentroidData<float[]> data = (CentroidData<float[]>) ivfReader.readCentroidData(fieldInfo.name);
