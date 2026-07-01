@@ -20,26 +20,35 @@ public record CentroidAssignments<V>(
     int numCentroids,
     V[] centroids,
     int[] assignments,
-    int[] overspillAssignments,
+    OverspillAssignments overspillAssignments,
     float[] globalCentroid,
     CentroidSlices centroidSlices
 ) {
 
-    public CentroidAssignments(int dims, float[][] centroids, int[] assignments, int[] overspillAssignments) {
-        this(centroids, assignments, overspillAssignments, computeGlobalCentroidFromFloats(dims, centroids), null);
-        assert assignments.length == overspillAssignments.length || overspillAssignments.length == 0
+    @SuppressWarnings("unchecked")
+    public CentroidAssignments(int dims, float[][] centroids, int[] assignments, OverspillAssignments overspillAssignments) {
+        this(centroids.length, (V[]) centroids, assignments, overspillAssignments, computeGlobalCentroidFromFloats(dims, centroids), null);
+        assert assignments.length == overspillAssignments.size() || overspillAssignments.size() == 0
             : "assignments and overspillAssignments must have the same length";
     }
 
+    @SuppressWarnings("unchecked")
     public CentroidAssignments(
         int dims,
         float[][] centroids,
         int[] assignments,
-        int[] overspillAssignments,
+        OverspillAssignments overspillAssignments,
         CentroidSlices centroidSlices
     ) {
-        this(centroids, assignments, overspillAssignments, computeGlobalCentroidFromFloats(dims, centroids), centroidSlices);
-        assert assignments.length == overspillAssignments.length || overspillAssignments.length == 0
+        this(
+            centroids.length,
+            (V[]) centroids,
+            assignments,
+            overspillAssignments,
+            computeGlobalCentroidFromFloats(dims, centroids),
+            centroidSlices
+        );
+        assert assignments.length == overspillAssignments.size() || overspillAssignments.size() == 0
             : "assignments and overspillAssignments must have the same length";
         assert centroidSlices == null || Arrays.stream(centroidSlices.sliceNumVectors()).sum() == assignments.length;
         assert centroidSlices == null || CentroidSlices.assertSliceOffsets(centroidSlices.sliceOffsets(), centroids.length);
@@ -53,7 +62,7 @@ public record CentroidAssignments<V>(
         float[] globalCentroid,
         CentroidSlices centroidSlices
     ) {
-        this(centroids.length, (V[]) centroids, assignments, overspillAssignments, globalCentroid, centroidSlices);
+        this(centroids.length, (V[]) centroids, assignments, new SoarAssignments(overspillAssignments), globalCentroid, centroidSlices);
     }
 
     public static CentroidAssignments<byte[]> ofBytes(int dims, byte[][] centroids, int[] assignments, int[] overspillAssignments) {
@@ -61,7 +70,7 @@ public record CentroidAssignments<V>(
             centroids.length,
             centroids,
             assignments,
-            overspillAssignments,
+            new SoarAssignments(overspillAssignments),
             computeGlobalCentroidFromBytes(dims, centroids),
             null
         );
@@ -79,7 +88,14 @@ public record CentroidAssignments<V>(
             : "assignments and overspillAssignments must have the same length";
         assert centroidSlices == null || Arrays.stream(centroidSlices.sliceNumVectors()).sum() == assignments.length;
         assert centroidSlices == null || CentroidSlices.assertSliceOffsets(centroidSlices.sliceOffsets(), centroids.length);
-        return new CentroidAssignments<>(centroids.length, centroids, assignments, overspillAssignments, globalCentroid, centroidSlices);
+        return new CentroidAssignments<>(
+            centroids.length,
+            centroids,
+            assignments,
+            new SoarAssignments(overspillAssignments),
+            globalCentroid,
+            centroidSlices
+        );
     }
 
     /**

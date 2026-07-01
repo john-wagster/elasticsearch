@@ -43,7 +43,7 @@ public class ByteKMeansTests extends ESTestCase {
             soarLambda
         );
 
-        KMeansResult<byte[]> result = hkmeans.cluster(vectors, targetSize);
+        KMeansWithOverspill<byte[]> result = hkmeans.cluster(vectors, targetSize);
 
         byte[][] centroids = result.centroids();
         int[] assignments = result.assignments();
@@ -174,7 +174,7 @@ public class ByteKMeansTests extends ESTestCase {
         ClusteringByteVectorValues vectors = KMeansByteVectorValues.build(vectorList, null, dims);
 
         HierarchicalKMeans<byte[]> hkmeans = HierarchicalKMeans.ofSerial(CentroidOps.BYTE, dims, 10, nVectors, 512, 1.0f);
-        KMeansResult<byte[]> result = hkmeans.cluster(vectors, nVectors / nClusters);
+        KMeansWithOverspill<byte[]> result = hkmeans.cluster(vectors, nVectors / nClusters);
 
         int[] assignments = result.assignments();
 
@@ -217,7 +217,7 @@ public class ByteKMeansTests extends ESTestCase {
         // Request more clusters than natural groups — some should end up empty and get removed
         int targetSize = nVectors / 10; // aim for ~10 clusters but data only has 2 natural ones
         HierarchicalKMeans<byte[]> hkmeans = HierarchicalKMeans.ofSerial(CentroidOps.BYTE, dims, 5, nVectors, 512, -1f);
-        KMeansResult<byte[]> result = hkmeans.cluster(vectors, targetSize);
+        KMeansWithOverspill<byte[]> result = hkmeans.cluster(vectors, targetSize);
 
         // Should not throw ClassCastException
         assertNotNull(result);

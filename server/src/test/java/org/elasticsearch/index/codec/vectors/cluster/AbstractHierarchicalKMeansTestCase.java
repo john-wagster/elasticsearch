@@ -51,7 +51,7 @@ public abstract class AbstractHierarchicalKMeansTestCase<V> extends ESTestCase {
             clustersPerNeighborhood,
             soarLambda
         );
-        KMeansResult<V> serialResult = hkmeansSerial.cluster(vectors, targetSize);
+        var serialResult = hkmeansSerial.cluster(vectors, targetSize);
         assertKMeansResultValid(serialResult, nVectors, nClusters);
 
         int[] serialClusterSizes = new int[serialResult.centroids().length];
@@ -72,7 +72,7 @@ public abstract class AbstractHierarchicalKMeansTestCase<V> extends ESTestCase {
                 clustersPerNeighborhood,
                 soarLambda
             );
-            KMeansResult<V> concurrentResult = hkmeansConcurrent.cluster(vectors, targetSize);
+            var concurrentResult = hkmeansConcurrent.cluster(vectors, targetSize);
             assertKMeansResultValid(concurrentResult, nVectors, nClusters);
 
             int[] concurrentClusterSizes = new int[concurrentResult.centroids().length];
@@ -106,8 +106,71 @@ public abstract class AbstractHierarchicalKMeansTestCase<V> extends ESTestCase {
             random().nextFloat(0.5f, 1.5f)
         );
 
-        KMeansResult<V> result = hkmeans.cluster(vectors, targetSize);
+        var result = hkmeans.cluster(vectors, targetSize);
         assertKMeansResultValid(result, nVectors, -1);
+    }
+
+    /**
+     * Verify that SOAR assignments never collide with primary assignments after empty clusters
+     * are removed. This exercises the neighborhood remapping in removeEmptyClusters: when empty
+     * centroids are compacted out and neighbor indices are remapped, no neighbor should be mapped
+     * to a vector's own primary centroid.
+     *
+     * The test creates a dataset with fewer natural clusters than what the algorithm targets,
+     * uses a small clustersPerNeighborhood to force neighborhood-aware SOAR, and repeats across
+     * random parameters to cover different empty-cluster scenarios.
+     */
+    public void testSoarAssignmentsValidAfterEmptyClusterRemoval() throws IOException {
+        CentroidOps<V> ops = centroidOps();
+        for (int trial = 0; trial < 200; trial++) {
+            // Use few natural clusters but many vectors, so the algorithm over-partitions
+            // and some clusters end up empty after refinement.
+            int naturalClusters = randomIntBetween(2, 4);
+            int nVectors = randomIntBetween(200, 1000);
+            int dims = randomIntBetween(4, 32);
+
+            ClusteringVectorValues<V> vectors = generateData(nVectors, dims, naturalClusters);
+
+            // Small clustersPerNeighborhood ensures neighborhoods are active when centroids > this value
+            int clustersPerNeighborhood = 2;
+            // Very small target size forces many centroids, maximizing chance of empty clusters
+            int targetSize = randomIntBetween(3, 10);
+            float soarLambda = randomFloat() * 0.5f + 0.5f;
+            // Low maxIterations increases chance of poorly-converged clusters that become empty
+            int maxIterations = randomIntBetween(1, 5);
+
+            HierarchicalKMeans<V> hkmeans = HierarchicalKMeans.ofSerial(
+                ops,
+                dims,
+                maxIterations,
+                randomIntBetween(50, nVectors),
+                clustersPerNeighborhood,
+                soarLambda
+            );
+
+            var result = hkmeans.cluster(vectors, targetSize);
+
+            int[] assignments = result.assignments();
+            int[] soarAssignments = result.soarAssignments();
+
+            if (result.centroids().length > 1 && result.centroids().length < nVectors) {
+                assertEquals(nVectors, soarAssignments.length);
+                for (int i = 0; i < assignments.length; i++) {
+                    int soar = soarAssignments[i];
+                    if (soar != NO_SOAR_ASSIGNMENT) {
+                        assertNotEquals(
+                            "SOAR assignment collides with primary assignment for vector "
+                                + i
+                                + " (both assigned to centroid "
+                                + assignments[i]
+                                + ")",
+                            assignments[i],
+                            soar
+                        );
+                    }
+                }
+            }
+        }
     }
 
     protected abstract ClusteringVectorValues<V> generateFewDistinctData(int nVectors, int dims, int diffValues);
@@ -123,12 +186,12 @@ public abstract class AbstractHierarchicalKMeansTestCase<V> extends ESTestCase {
 
         // First, do a full cluster to get "initial centroids" (simulating a dominant segment's priors)
         HierarchicalKMeans<V> hkmeans = HierarchicalKMeans.ofSerial(ops, dims);
-        KMeansResult<V> fullResult = hkmeans.cluster(vectors, targetSize);
+        KMeansWithOverspill<V> fullResult = hkmeans.cluster(vectors, targetSize);
         assertKMeansResultValid(fullResult, nVectors, nClusters);
 
         // Now use those centroids as initial seeds for clusterByInsertion
         ClusteringVectorValues<V> priorView = wrapAsView(fullResult.centroids(), dims);
-        KMeansResult<V> insertionResult = hkmeans.clusterByInsertion(vectors, priorView, targetSize);
+        KMeansWithOverspill<V> insertionResult = hkmeans.clusterByInsertion(vectors, priorView, targetSize);
         assertKMeansResultValid(insertionResult, nVectors, nClusters);
     }
 
@@ -143,19 +206,19 @@ public abstract class AbstractHierarchicalKMeansTestCase<V> extends ESTestCase {
 
         // Full cluster to get "prior centroids" simulating concatenated priors from multiple segments
         HierarchicalKMeans<V> hkmeans = HierarchicalKMeans.ofSerial(ops, dims);
-        KMeansResult<V> fullResult = hkmeans.cluster(vectors, targetSize);
+        KMeansWithOverspill<V> fullResult = hkmeans.cluster(vectors, targetSize);
         assertKMeansResultValid(fullResult, nVectors, nClusters);
 
-        int[] clusterSizes = fullResult.clusterCounts();
+        int[] clusterSizes = fullResult.result().clusterCounts();
         ClusteringVectorValues<V> priorView = wrapAsView(fullResult.centroids(), dims);
 
-        KMeansResult<V> concatResult = hkmeans.clusterByConcatenation(vectors, priorView, clusterSizes, nVectors, targetSize);
+        KMeansWithOverspill<V> concatResult = hkmeans.clusterByConcatenation(vectors, priorView, clusterSizes, nVectors, targetSize);
         assertKMeansResultValid(concatResult, nVectors, nClusters);
     }
 
     // ---- Helpers ----
 
-    protected static <V> void assertKMeansResultValid(KMeansResult<V> result, int nVectors, int expectedClusters) {
+    protected static <V> void assertKMeansResultValid(KMeansWithOverspill<V> result, int nVectors, int expectedClusters) {
         V[] centroids = result.centroids();
         int[] assignments = result.assignments();
         int[] soarAssignments = result.soarAssignments();
@@ -178,7 +241,7 @@ public abstract class AbstractHierarchicalKMeansTestCase<V> extends ESTestCase {
         for (int count : counts) {
             assertTrue("Empty cluster found", count > 0);
         }
-        assertArrayEquals(counts, result.clusterCounts());
+        assertArrayEquals(counts, result.result().clusterCounts());
 
         if (centroids.length > 1 && centroids.length < nVectors) {
             assertEquals(nVectors, soarAssignments.length);

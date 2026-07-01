@@ -10,6 +10,8 @@ package org.elasticsearch.index.codec.vectors.diskbbq;
 
 import org.elasticsearch.test.ESTestCase;
 
+import static org.junit.Assert.assertArrayEquals;
+
 /**
  * Tests for {@link CentroidAssignments} byte-backed factories and widening.
  */
@@ -26,7 +28,7 @@ public class CentroidAssignmentsTests extends ESTestCase {
         assertEquals(3, ca.numCentroids());
         assertSame(centroids, ca.centroids());
         assertSame(assignments, ca.assignments());
-        assertSame(overspill, ca.overspillAssignments());
+        assertArrayEquals(overspill, ((SoarAssignments) ca.overspillAssignments()).assignments());
         assertNull(ca.centroidSlices());
     }
 
@@ -88,7 +90,7 @@ public class CentroidAssignmentsTests extends ESTestCase {
         int[] assignments = new int[] { 0, 1 };
         int[] overspill = new int[0];
 
-        CentroidAssignments<float[]> ca = new CentroidAssignments<>(dims, centroids, assignments, overspill);
+        CentroidAssignments<float[]> ca = new CentroidAssignments<>(dims, centroids, assignments, new SoarAssignments(overspill));
 
         float[][] result = ca.floatCentroids();
         assertSame(centroids, result);

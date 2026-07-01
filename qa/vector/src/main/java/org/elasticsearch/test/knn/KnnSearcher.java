@@ -115,6 +115,7 @@ public class KnnSearcher {
     private final Path indexPath;
     private final Path queryPath;
     private final int numDocs;
+    private final int numDeletedDocs;
     private final int numQueryVectors;
     private final KnnIndexTester.IndexType indexType;
     private final boolean sliced;
@@ -129,6 +130,7 @@ public class KnnSearcher {
         this.indexPath = indexPath;
         this.queryPath = testConfiguration.queryVectors();
         this.numDocs = testConfiguration.numDocs();
+        this.numDeletedDocs = testConfiguration.numDeletedDocs();
         this.numQueryVectors = testConfiguration.numQueries();
         this.dim = testConfiguration.dimensions();
         this.similarityFunction = testConfiguration.vectorSpace();
@@ -629,6 +631,7 @@ public class KnnSearcher {
                 indexPath,
                 queryPath,
                 numDocs,
+                numDeletedDocs,
                 numQueryVectors,
                 sampledPartitions,
                 params.topK(),
@@ -702,6 +705,7 @@ public class KnnSearcher {
                 docPath,
                 queryPath,
                 numDocs,
+                numDeletedDocs,
                 numQueryVectors,
                 searchParameters.topK(),
                 similarityFunction.ordinal(),
