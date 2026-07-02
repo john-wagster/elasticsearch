@@ -80,13 +80,7 @@ class FlatCentroidIndex implements CentroidIndex {
             globalCentroid = globalCentroid.clone();
             VectorUtil.l2normalize(globalCentroid);
         }
-        queryParams = scalarQuantizer.scalarQuantize(
-            targetQuery,
-            new float[targetQuery.length],
-            scratch,
-            (byte) 7,
-            globalCentroid
-        );
+        queryParams = scalarQuantizer.scalarQuantize(targetQuery, new float[targetQuery.length], scratch, (byte) 7, globalCentroid);
         quantized = new byte[targetQuery.length];
         for (int i = 0; i < quantized.length; i++) {
             quantized[i] = (byte) scratch[i];

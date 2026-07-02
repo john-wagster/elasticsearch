@@ -45,6 +45,7 @@ import org.elasticsearch.index.codec.vectors.cluster.ClusteringByteVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringFloatVectorValuesSlice;
 import org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans;
+import org.elasticsearch.index.codec.vectors.cluster.KMeansByteVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansResult;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansWithOverspill;
@@ -985,6 +986,36 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         return hierarchicalKMeans.cluster(floatVectorValues, centroidsPerParentCluster).result();
     }
 
+    private KMeansResult<byte[]> buildSecondLevelClustersNative(
+        FieldInfo fieldInfo,
+        ClusteringByteVectorValues byteVectorValues,
+        boolean isMerge
+    ) throws IOException {
+        HierarchicalKMeans<byte[]> hierarchicalKMeans;
+        if (isMerge && mergeExec != null) {
+            hierarchicalKMeans = HierarchicalKMeans.ofConcurrent(
+                CentroidOps.BYTE,
+                fieldInfo.getVectorDimension(),
+                mergeExec,
+                numMergeWorkers,
+                HierarchicalKMeans.MAX_ITERATIONS_DEFAULT,
+                HierarchicalKMeans.SAMPLES_PER_CLUSTER_DEFAULT,
+                HierarchicalKMeans.MAXK,
+                -1 // disable SOAR assignments
+            );
+        } else {
+            hierarchicalKMeans = HierarchicalKMeans.ofSerial(
+                CentroidOps.BYTE,
+                fieldInfo.getVectorDimension(),
+                HierarchicalKMeans.MAX_ITERATIONS_DEFAULT,
+                HierarchicalKMeans.SAMPLES_PER_CLUSTER_DEFAULT,
+                HierarchicalKMeans.MAXK,
+                -1 // disable SOAR assignments
+            );
+        }
+        return hierarchicalKMeans.cluster(byteVectorValues, centroidsPerParentCluster).result();
+    }
+
     private CentroidGroups buildCentroidGroups(KMeansResult<float[]> kMeansResult) {
         final int[] centroidVectorCount = new int[kMeansResult.centroids().length];
         for (int i = 0; i < kMeansResult.assignments().length; i++) {
@@ -1383,7 +1414,9 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                     // Only use centroid data if it was byte-backed (non-COSINE byte fields stored as bytes).
                     // COSINE byte fields store centroids as float, so they won't work for the byte tiered path.
                     if (data != null && data.centroids() instanceof ClusteringByteVectorValues) {
-                        segmentCentroidData[i] = (IVFVectorsReader.CentroidData<byte[]>) (IVFVectorsReader.CentroidData) data;
+                        @SuppressWarnings("unchecked")
+                        CentroidData<byte[]> byteData = (CentroidData<byte[]>) (CentroidData<?>) data;
+                        segmentCentroidData[i] = byteData;
                         segmentCentroidCounts[i] = data.numCentroids();
                     } else {
                         segmentCentroidCounts[i] = 0;
@@ -1504,9 +1537,24 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             info.getVectorDimension()
         );
         if (centroidSupplier.size() > centroidsPerParentCluster * centroidsPerParentCluster) {
-            // FIXME: second-level clustering uses float-widened centroids; evaluate native byte clustering for centroids in a follow-up
-            KMeansResult<float[]> centroidClusters = buildSecondLevelClusters(info, centroidSupplier.asKmeansFloatVectorValues(), false);
-            return CentroidSupplier.fromByteArray(centroids, centroidClusters, info.getVectorDimension());
+            // Cluster byte centroids natively in byte space, then widen the result centroids
+            // to float for the parent index (which is always searched in float precision).
+            ClusteringByteVectorValues byteVectorValues = KMeansByteVectorValues.build(
+                java.util.Arrays.asList(centroids),
+                null,
+                info.getVectorDimension()
+            );
+            KMeansResult<byte[]> byteResult = buildSecondLevelClustersNative(info, byteVectorValues, false);
+            // Widen byte parent centroids to float for the search-time parent index
+            byte[][] byteCentroids = byteResult.centroids();
+            float[][] floatCentroids = new float[byteCentroids.length][info.getVectorDimension()];
+            for (int i = 0; i < byteCentroids.length; i++) {
+                for (int d = 0; d < info.getVectorDimension(); d++) {
+                    floatCentroids[i][d] = byteCentroids[i][d];
+                }
+            }
+            KMeansResult<float[]> floatResult = KMeansResult.of(floatCentroids, byteResult.assignments());
+            return CentroidSupplier.fromByteArray(centroids, floatResult, info.getVectorDimension());
         }
         return centroidSupplier;
     }

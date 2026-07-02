@@ -56,6 +56,15 @@ public class KMeansResult<V> {
         return new KMeansResult<>(new float[][] { centroid }, new int[numVectors]);
     }
 
+    /**
+     * Creates a KMeansResult from pre-computed centroids and assignments.
+     * Used when clustering is done in one type (e.g. byte) and the result needs to be
+     * represented in another type (e.g. float) after widening.
+     */
+    public static <V> KMeansResult<V> of(V[] centroids, int[] assignments) {
+        return new KMeansResult<>(centroids, assignments);
+    }
+
     KMeansResult(V[] centroids, int[] assignments) {
         assert centroids != null;
         assert assignments != null;
