@@ -36,6 +36,8 @@ import org.apache.lucene.tests.util.TestUtil;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.logging.LogConfigurator;
 import org.elasticsearch.index.cache.query.TrivialQueryCachingPolicy;
+import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIndexFormat;
+import org.elasticsearch.index.codec.vectors.diskbbq.QuantEncoding;
 import org.elasticsearch.index.codec.vectors.diskbbq.TestIvfQueryConfigResolver;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat;
 import org.elasticsearch.index.engine.Engine;
@@ -79,12 +81,7 @@ public class DiversifyingChildrenIVFKnnByteSlicedVectorQueryTests extends Lucene
     }
 
     private TestIvfQueryConfigResolver testResolver() {
-        return new TestIvfQueryConfigResolver(
-            ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
-            ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
-            false,
-            1.0f
-        );
+        return new TestIvfQueryConfigResolver(CentroidIndexFormat.FLAT, QuantEncoding.ONE_BIT_4BIT_QUERY, false, 1.0f);
     }
 
     private static void addRoutingSlice(Document doc, BytesRef sliceId) {

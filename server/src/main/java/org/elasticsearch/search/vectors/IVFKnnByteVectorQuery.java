@@ -37,14 +37,13 @@ import java.util.function.LongSupplier;
 
 /**
  * An IVF kNN query for byte-encoded vector fields. For COSINE similarity, the query vector is
- * normalized to float[] in {@link #preconditionQuery} so the search always routes through the
+ * normalized to float[] in {@link #prepareSegmentQuery} so the search always routes through the
  * float path. For non-COSINE, the raw byte[] is passed directly to the codec.
  */
 public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
 
     // package-private for IVFKnnByteSlicedVectorQuery access
     final byte[] query;
-    private boolean isQueryPreconditioned = false;
     // package-private for IVFKnnByteSlicedVectorQuery access
     float[] preconditionedQuery = null;
 
@@ -108,40 +107,44 @@ public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
         return result;
     }
 
-    @Override
-    protected void preconditionQuery(LeafReaderContext context) throws IOException {
-        if (isQueryPreconditioned) {
-            return;
-        }
+    /**
+     * Returns the query to use for the given segment. When {@code usePrecondition} is set, the
+     * segment's own preconditioner is applied. For COSINE similarity, the byte query is converted
+     * to a normalized float[]. Falls back to populating {@link #preconditionedQuery} for COSINE
+     * even without a preconditioner, so the float search path is used.
+     */
+    protected void prepareSegmentQuery(LeafReaderContext context, boolean usePrecondition) throws IOException {
+        preconditionedQuery = null;
         LeafReader reader = context.reader();
         FieldInfo fieldInfo = reader.getFieldInfos().fieldInfo(field);
         if (fieldInfo == null) {
             return;
         }
 
-        // Attempt preconditioning via the segment's VectorPreconditioner
-        SegmentReader segmentReader = Lucene.tryUnwrapSegmentReader(reader);
-        if (segmentReader != null) {
-            KnnVectorsReader fieldsReader = segmentReader.getVectorReader();
-            if (fieldsReader instanceof PerFieldKnnVectorsFormat.FieldsReader) {
-                KnnVectorsReader knnVectorsReader = ((PerFieldKnnVectorsFormat.FieldsReader) fieldsReader).getFieldReader(field);
-                if (knnVectorsReader instanceof VectorPreconditioner) {
-                    Preconditioner preconditioner = ((VectorPreconditioner) knnVectorsReader).getPreconditioner(fieldInfo);
-                    if (preconditioner != null) {
-                        float[] out = new float[query.length];
-                        if (fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE) {
-                            float[] floatQuery = new float[query.length];
-                            for (int i = 0; i < query.length; i++) {
-                                floatQuery[i] = query[i];
+        if (usePrecondition) {
+            // Attempt preconditioning via the segment's VectorPreconditioner
+            SegmentReader segmentReader = Lucene.tryUnwrapSegmentReader(reader);
+            if (segmentReader != null) {
+                KnnVectorsReader fieldsReader = segmentReader.getVectorReader();
+                if (fieldsReader instanceof PerFieldKnnVectorsFormat.FieldsReader) {
+                    KnnVectorsReader knnVectorsReader = ((PerFieldKnnVectorsFormat.FieldsReader) fieldsReader).getFieldReader(field);
+                    if (knnVectorsReader instanceof VectorPreconditioner) {
+                        Preconditioner preconditioner = ((VectorPreconditioner) knnVectorsReader).getPreconditioner(fieldInfo);
+                        if (preconditioner != null) {
+                            float[] out = new float[query.length];
+                            if (fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE) {
+                                float[] floatQuery = new float[query.length];
+                                for (int i = 0; i < query.length; i++) {
+                                    floatQuery[i] = query[i];
+                                }
+                                VectorUtil.l2normalize(floatQuery);
+                                preconditioner.applyTransform(floatQuery, out);
+                            } else {
+                                preconditioner.applyTransform(query, out);
                             }
-                            VectorUtil.l2normalize(floatQuery);
-                            preconditioner.applyTransform(floatQuery, out);
-                        } else {
-                            preconditioner.applyTransform(query, out);
+                            preconditionedQuery = out;
+                            return;
                         }
-                        preconditionedQuery = out;
-                        isQueryPreconditioned = true;
-                        return;
                     }
                 }
             }
@@ -156,16 +159,21 @@ public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
             }
             VectorUtil.l2normalize(normalized);
             preconditionedQuery = normalized;
-            isQueryPreconditioned = true;
         }
     }
 
     @Override
-    TopDocs getLeafResults(LeafReaderContext ctx, Weight filterWeight, IVFCollectorManager knnCollectorManager, float visitRatio)
-        throws IOException {
+    TopDocs getLeafResults(
+        LeafReaderContext ctx,
+        Weight filterWeight,
+        IVFCollectorManager knnCollectorManager,
+        float visitRatio,
+        boolean usePrecondition
+    ) throws IOException {
         final LeafReader reader = ctx.reader();
         final Bits liveDocs = reader.getLiveDocs();
         final int maxDoc = reader.maxDoc();
+        prepareSegmentQuery(ctx, usePrecondition);
 
         if (filterWeight == null) {
             return approximateSearch(

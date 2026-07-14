@@ -14,8 +14,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-
-import static org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans.NO_SOAR_ASSIGNMENT;
+import java.util.function.IntUnaryOperator;
 
 /**
  * Tests for generic KMeans clustering with {@link CentroidOps#BYTE}.
@@ -29,7 +28,6 @@ public class ByteKMeansTests extends ESTestCase {
         int sampleSize = randomIntBetween(Math.min(nVectors, 100), nVectors);
         int maxIterations = randomIntBetween(1, 20);
         int clustersPerNeighborhood = randomIntBetween(2, 512);
-        float soarLambda = randomFloat() * 1.0f + 0.5f;
 
         ClusteringByteVectorValues vectors = generateByteData(nVectors, dims, nClusters);
 
@@ -39,15 +37,13 @@ public class ByteKMeansTests extends ESTestCase {
             dims,
             maxIterations,
             sampleSize,
-            clustersPerNeighborhood,
-            soarLambda
+            clustersPerNeighborhood
         );
 
-        KMeansWithOverspill<byte[]> result = hkmeans.cluster(vectors, targetSize);
+        KMeansNeighbors<byte[]> result = hkmeans.cluster(vectors, targetSize);
 
         byte[][] centroids = result.centroids();
         int[] assignments = result.assignments();
-        int[] soarAssignments = result.soarAssignments();
 
         // Should produce roughly the expected number of clusters
         assertTrue("Expected at least 1 centroid", centroids.length >= 1);
@@ -68,16 +64,6 @@ public class ByteKMeansTests extends ESTestCase {
             assertTrue("Empty cluster found", count > 0);
         }
 
-        // SOAR assignments valid
-        if (centroids.length > 1 && centroids.length < nVectors) {
-            assertEquals(nVectors, soarAssignments.length);
-            for (int i = 0; i < assignments.length; i++) {
-                int soar = soarAssignments[i];
-                assertTrue(soar == NO_SOAR_ASSIGNMENT || (soar >= 0 && soar < centroids.length));
-                assertNotEquals(assignments[i], soar);
-            }
-        }
-
         // Centroids have correct dimensions
         for (byte[] centroid : centroids) {
             assertEquals(dims, centroid.length);
@@ -95,10 +81,10 @@ public class ByteKMeansTests extends ESTestCase {
 
         byte[][] centroids = KMeansLocal.pickInitialCentroids(vectors, nClusters, CentroidOps.BYTE);
         int[] assignments = new int[nVectors];
-        KMeansIntermediate<byte[]> kMeansIntermediate = new KMeansIntermediate<>(centroids, assignments);
+        KMeansIntermediate<byte[]> kMeansIntermediate = new KMeansIntermediate<>(centroids, assignments, IntUnaryOperator.identity());
 
         KMeansLocal<byte[]> kMeansLocal = new BalancedOTKMeansLocalSerial<>(CentroidOps.BYTE, sampleSize, maxIterations);
-        kMeansLocal.cluster(vectors, kMeansIntermediate, nClusters, -1f);
+        kMeansLocal.cluster(vectors, kMeansIntermediate);
 
         // All assignments valid
         for (int a : kMeansIntermediate.assignments()) {
@@ -127,8 +113,11 @@ public class ByteKMeansTests extends ESTestCase {
         ClusteringByteVectorValues vectors = generateByteData(nVectors, dims, nClusters);
 
         byte[][] centroids = KMeansLocal.pickInitialCentroids(vectors, nClusters, CentroidOps.BYTE);
+        int[] assignments = new int[nVectors];
+        KMeansResult<byte[]> kMeansResult = KMeansResult.of(centroids, assignments);
 
-        LloydKMeansLocal.cluster(vectors, CentroidOps.BYTE, centroids, sampleSize, maxIterations);
+        LloydKMeansLocalSerial<byte[]> lloyd = new LloydKMeansLocalSerial<>(CentroidOps.BYTE, sampleSize, maxIterations);
+        lloyd.cluster(vectors, kMeansResult);
 
         // Centroids should have been updated (not all zeros unless input was zeros)
         boolean anyNonZero = false;
@@ -173,8 +162,8 @@ public class ByteKMeansTests extends ESTestCase {
 
         ClusteringByteVectorValues vectors = KMeansByteVectorValues.build(vectorList, null, dims);
 
-        HierarchicalKMeans<byte[]> hkmeans = HierarchicalKMeans.ofSerial(CentroidOps.BYTE, dims, 10, nVectors, 512, 1.0f);
-        KMeansWithOverspill<byte[]> result = hkmeans.cluster(vectors, nVectors / nClusters);
+        HierarchicalKMeans<byte[]> hkmeans = HierarchicalKMeans.ofSerial(CentroidOps.BYTE, dims, 10, nVectors, 512);
+        KMeansNeighbors<byte[]> result = hkmeans.cluster(vectors, nVectors / nClusters);
 
         int[] assignments = result.assignments();
 
@@ -216,8 +205,8 @@ public class ByteKMeansTests extends ESTestCase {
 
         // Request more clusters than natural groups — some should end up empty and get removed
         int targetSize = nVectors / 10; // aim for ~10 clusters but data only has 2 natural ones
-        HierarchicalKMeans<byte[]> hkmeans = HierarchicalKMeans.ofSerial(CentroidOps.BYTE, dims, 5, nVectors, 512, -1f);
-        KMeansWithOverspill<byte[]> result = hkmeans.cluster(vectors, targetSize);
+        HierarchicalKMeans<byte[]> hkmeans = HierarchicalKMeans.ofSerial(CentroidOps.BYTE, dims, 5, nVectors, 512);
+        KMeansNeighbors<byte[]> result = hkmeans.cluster(vectors, targetSize);
 
         // Should not throw ClassCastException
         assertNotNull(result);

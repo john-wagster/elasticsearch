@@ -9,9 +9,11 @@
 
 package org.elasticsearch.index.codec.vectors.cluster;
 
+import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
 import org.apache.lucene.util.VectorUtil;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
 
 import java.io.IOException;
@@ -42,19 +44,51 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
 
     /**
      * Build an instance from on-heap data structures.
+     *
+     * @param vectors   The vectors
+     * @param docs      Array of document IDs. Maps the vector ordinal to its docID. Null if ordinal == docID.
+     * @param dim       Vector dimensions
      */
-    public static KMeansFloatVectorValues build(List<float[]> vectors, int[] docs, int dim) {
+    public static KMeansFloatVectorValues build(List<float[]> vectors, @Nullable int[] docs, int dim) {
         VectorSupplier vectorSupplier = new OnHeapVectorSupplier(vectors, dim);
         DocSupplier docSupplier = docs == null ? null : new OnHeapDocSupplier(docs);
         return new KMeansFloatVectorValues(vectorSupplier, docSupplier, vectors.size());
     }
 
     /**
-     * Builds an instance from off-heap data structures. Vectors are expected to be written as
-     * little endian floats one after the other. Docs are expected to be written as little endian ints
-     * one after the other.
+     * View over {@link FloatVectorValues} using {@code ordinals[i]} as the delegate ordinal for local ordinal {@code i}.
+     * Returned vectors are the delegate's live buffers and must not be retained across a later {@code vectorValue} call
+     * on this instance. Clustering code satisfies that contract; callers that need a stable copy must copy themselves.
      */
-    public static KMeansFloatVectorValues build(IndexInput vectors, IndexInput docs, int numVectors, int dims) throws IOException {
+    public static KMeansFloatVectorValues wrap(FloatVectorValues fvv, int[] ordinals) {
+        VectorSupplier supplier = new FloatVectorValuesSupplier(fvv, ordinals);
+        return new KMeansFloatVectorValues(supplier, null, ordinals.length);
+    }
+
+    /**
+     * Like {@link #wrap(FloatVectorValues, int[])} but only the first {@code length} ordinals are used
+     * (local ordinals {@code 0 .. length-1} map to {@code fvv.vectorValue(ordinals[i])}).
+     * Reuses the backing {@code ordinals} array without copying when a prefix of the full corpus is needed.
+     * See {@link #wrap(FloatVectorValues, int[])} for vector reuse semantics.
+     */
+    public static KMeansFloatVectorValues wrap(FloatVectorValues fvv, int[] ordinals, int length) {
+        if (length < 0 || length > ordinals.length) {
+            throw new IllegalArgumentException("length must be in [0, ordinals.length]");
+        }
+        VectorSupplier supplier = new FloatVectorValuesSupplier(fvv, ordinals);
+        return new KMeansFloatVectorValues(supplier, null, length);
+    }
+
+    /**
+     * Builds an instance from off-heap data structures.
+     *
+     * @param vectors    Vectors as little-endian floats concatenated together.
+     * @param docs       Document IDs in ordinal order, as little-endian int32. Null if ordinal == docID.
+     * @param numVectors The number of vectors
+     * @param dims       Vector dimensions
+     */
+    public static KMeansFloatVectorValues build(IndexInput vectors, @Nullable IndexInput docs, int numVectors, int dims)
+        throws IOException {
         long vectorLength = (long) dims * Float.BYTES;
         float[] vector = new float[dims];
         VectorSupplier vectorSupplier = new OffHeapVectorSupplier(vectors, vector, vectorLength);
@@ -165,7 +199,7 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
     }
 
     @Override
-    public ClusteringFloatVectorValues copy() {
+    public ClusteringFloatVectorValues copy() throws IOException {
         VectorSupplier copiedVectors = vectors.copy();
         // When the vectors supplier also implements ByteSupplier, the copy is the same object
         ByteSupplier copiedByteSupplier = copiedVectors instanceof ByteSupplier bs ? bs : null;
@@ -193,13 +227,13 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
     }
 
     private sealed interface VectorSupplier permits OffHeapVectorSupplier, OnHeapVectorSupplier, OffHeapByteVectorSupplier,
-        OnHeapByteVectorSupplier {
+        OnHeapByteVectorSupplier, FloatVectorValuesSupplier {
 
         float[] vector(int ord) throws IOException;
 
         int dims();
 
-        VectorSupplier copy();
+        VectorSupplier copy() throws IOException;
     }
 
     private record OnHeapVectorSupplier(List<float[]> vectors, int dims) implements VectorSupplier {
@@ -372,7 +406,7 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
     private sealed interface DocSupplier permits OnHeapDocSupplier, OffHeapDocSupplier {
         int ordToDoc(int ord);
 
-        DocSupplier copy();
+        DocSupplier copy() throws IOException;
     }
 
     private record OnHeapDocSupplier(int[] docs) implements DocSupplier {
@@ -398,14 +432,36 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
         }
 
         @Override
-        public DocSupplier copy() {
+        public DocSupplier copy() throws IOException {
             IndexInput docsCopy = docs.clone();
-            try {
-                RandomAccessInput randomDocsCopy = docsCopy.randomAccessSlice(0, docsCopy.length());
-                return new OffHeapDocSupplier(docsCopy, randomDocsCopy);
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
+            RandomAccessInput randomDocsCopy = docsCopy.randomAccessSlice(0, docsCopy.length());
+            return new OffHeapDocSupplier(docsCopy, randomDocsCopy);
+        }
+    }
+
+    private static final class FloatVectorValuesSupplier implements VectorSupplier {
+
+        private final FloatVectorValues fvv;
+        private final int[] ordinals;
+
+        FloatVectorValuesSupplier(FloatVectorValues fvv, int[] ordinals) {
+            this.fvv = fvv;
+            this.ordinals = ordinals;
+        }
+
+        @Override
+        public float[] vector(int ord) throws IOException {
+            return fvv.vectorValue(ordinals[ord]);
+        }
+
+        @Override
+        public int dims() {
+            return fvv.dimension();
+        }
+
+        @Override
+        public VectorSupplier copy() throws IOException {
+            return new FloatVectorValuesSupplier(fvv.copy(), ordinals);
         }
     }
 }

@@ -31,6 +31,8 @@ import org.apache.lucene.tests.util.TestUtil;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.logging.LogConfigurator;
 import org.elasticsearch.index.cache.query.TrivialQueryCachingPolicy;
+import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIndexFormat;
+import org.elasticsearch.index.codec.vectors.diskbbq.QuantEncoding;
 import org.elasticsearch.index.codec.vectors.diskbbq.TestIvfQueryConfigResolver;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat;
 import org.junit.Before;
@@ -96,12 +98,7 @@ abstract class AbstractIVFKnnSlicedVectorQueryTestCase extends LuceneTestCase {
     protected abstract Object firstQueryElement();
 
     protected TestIvfQueryConfigResolver testResolver() {
-        return new TestIvfQueryConfigResolver(
-            ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
-            ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
-            false,
-            1.0f
-        );
+        return new TestIvfQueryConfigResolver(CentroidIndexFormat.FLAT, QuantEncoding.ONE_BIT_4BIT_QUERY, false, 1.0f);
     }
 
     public void testSlicesDense() throws IOException {

@@ -67,12 +67,18 @@ public class IVFKnnByteSlicedVectorQuery extends IVFKnnByteVectorQuery {
     }
 
     @Override
-    TopDocs getLeafResults(LeafReaderContext ctx, Weight filterWeight, IVFCollectorManager knnCollectorManager, float visitRatio)
-        throws IOException {
+    TopDocs getLeafResults(
+        LeafReaderContext ctx,
+        Weight filterWeight,
+        IVFCollectorManager knnCollectorManager,
+        float visitRatio,
+        boolean usePrecondition
+    ) throws IOException {
         final LeafReader reader = ctx.reader();
         if (reader.numDocs() == 0) {
             return TopDocsCollector.EMPTY_TOPDOCS;
         }
+        prepareSegmentQuery(ctx, usePrecondition);
         final Bits liveDocs = reader.getLiveDocs();
         final int maxDoc = reader.maxDoc();
         final Sort sort = reader.getMetaData().sort();

@@ -134,6 +134,7 @@ import org.elasticsearch.xpack.esql.parser.QueryParams;
 import org.elasticsearch.xpack.esql.plan.EsqlStatement;
 import org.elasticsearch.xpack.esql.plan.IndexPattern;
 import org.elasticsearch.xpack.esql.plan.QuerySettings;
+import org.elasticsearch.xpack.esql.plan.ResolvedSettings;
 import org.elasticsearch.xpack.esql.plan.logical.Enrich;
 import org.elasticsearch.xpack.esql.plan.logical.EsRelation;
 import org.elasticsearch.xpack.esql.plan.logical.Eval;
@@ -786,8 +787,14 @@ public final class EsqlTestUtils {
     private EsqlTestUtils() {}
 
     public static Configuration configuration(QueryPragmas pragmas, String query, EsqlStatement statement) {
+        // No manual normalize here — TIME_ZONE.canonicalize(ZoneId::normalized) runs inside withOverride,
+        // so this matches production exactly.
+        ResolvedSettings resolved = ResolvedSettings.EMPTY.withOverride(QuerySettings.TIME_ZONE, statement.setting(QuerySettings.TIME_ZONE))
+            .withOverride(
+                QuerySettings.APPROXIMATION,
+                new ApproximationSettings.Builder(false).merge(statement.setting(QuerySettings.APPROXIMATION)).build()
+            );
         return new Configuration(
-            statement.setting(QuerySettings.TIME_ZONE),
             Instant.now(),
             Locale.US,
             null,
@@ -802,8 +809,7 @@ public final class EsqlTestUtils {
             false,
             AnalyzerSettings.QUERY_TIMESERIES_RESULT_TRUNCATION_MAX_SIZE.getDefault(Settings.EMPTY),
             AnalyzerSettings.QUERY_TIMESERIES_RESULT_TRUNCATION_DEFAULT_SIZE.getDefault(Settings.EMPTY),
-            null,
-            new ApproximationSettings.Builder(false).merge(statement.setting(QuerySettings.APPROXIMATION)).build(),
+            resolved,
             Map.of()
         );
     }
@@ -1357,7 +1363,7 @@ public final class EsqlTestUtils {
     }
 
     public static BytesRef randomHistogram() {
-        List<Double> values = ESTestCase.randomList(randomIntBetween(1, 1000), ESTestCase::randomDouble);
+        List<Double> values = ESTestCase.randomList(randomIntBetween(0, 1000), ESTestCase::randomDouble);
         values.sort(Double::compareTo);
         // Note - we need the three parameter version of random list here to ensure it's always the same length as values
         List<Long> counts = ESTestCase.randomList(values.size(), values.size(), () -> ESTestCase.randomLongBetween(1, Long.MAX_VALUE));
