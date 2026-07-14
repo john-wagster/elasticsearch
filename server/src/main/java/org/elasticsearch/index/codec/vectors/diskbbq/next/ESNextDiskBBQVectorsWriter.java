@@ -14,6 +14,7 @@ import org.apache.lucene.codecs.DocValuesProducer;
 import org.apache.lucene.codecs.KnnVectorsReader;
 import org.apache.lucene.codecs.hnsw.FlatVectorsWriter;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
+import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FloatVectorValues;
@@ -22,6 +23,7 @@ import org.apache.lucene.index.MergeState;
 import org.apache.lucene.index.OrdinalMap;
 import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.index.SortedDocValues;
+import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Sort;
@@ -779,7 +781,13 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                     reader = perFieldReader.getFieldReader(fieldInfo.name);
                 }
                 if (reader instanceof IVFVectorsReader<?> ivfReader && mergeState.fieldInfos[i].fieldInfo(fieldInfo.name) != null) {
-                    segmentSizes[i] = ivfReader.getFloatVectorValues(fieldInfo.name).size();
+                    // Get segment size — use the appropriate vector values accessor based on encoding
+                    if (fieldInfo.getVectorEncoding() == VectorEncoding.BYTE) {
+                        ByteVectorValues bvv = ivfReader.getByteVectorValues(fieldInfo.name);
+                        segmentSizes[i] = bvv != null ? bvv.size() : 0;
+                    } else {
+                        segmentSizes[i] = ivfReader.getFloatVectorValues(fieldInfo.name).size();
+                    }
                     segmentCentroidData[i] = ivfReader.readCentroidData(fieldInfo.name);
                     segmentCentroidCounts[i] = segmentCentroidData[i] != null ? segmentCentroidData[i].numCentroids() : 0;
                 } else {

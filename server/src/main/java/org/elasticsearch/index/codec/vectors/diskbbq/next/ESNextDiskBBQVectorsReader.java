@@ -269,8 +269,10 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
 
         // Byte-backed fields (non-COSINE) store centroids as 1 byte per dimension;
         // float-backed and COSINE byte fields store centroids as 4 bytes (float) per dimension.
-        boolean byteBacked = fieldInfo.getVectorEncoding() == VectorEncoding.BYTE
-            && fieldInfo.getVectorSimilarityFunction() != VectorSimilarityFunction.COSINE;
+        // Centroids are currently always stored as floats (4 bytes/dim), even for byte-encoded fields.
+        // The writer widens byte vectors to float for centroid storage. When native byte centroid
+        // storage is added to the ESNext writer, this flag will be derived from the on-disk format.
+        boolean byteBacked = false;
         int bytesPerComponent = byteBacked ? Byte.BYTES : Float.BYTES;
         long rawCentroidsSize = (long) numCentroids * dimension * bytesPerComponent;
 
@@ -462,8 +464,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         if (numParents > 0) {
             // unused
             int longestPostingList = centroidSlice.readVInt();
-            boolean parentsByteBacked = fieldInfo.getVectorEncoding() == VectorEncoding.BYTE
-                && fieldInfo.getVectorSimilarityFunction() != VectorSimilarityFunction.COSINE;
+            // Centroids are currently always stored as floats, even for byte-encoded fields.
+            boolean parentsByteBacked = false;
             int bytesPerComponent = parentsByteBacked ? Byte.BYTES : Float.BYTES;
             IndexInput parentsSlice = centroidSlice.slice(
                 "parents-slice",
