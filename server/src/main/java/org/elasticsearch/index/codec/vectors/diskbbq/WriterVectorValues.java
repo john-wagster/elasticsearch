@@ -10,7 +10,6 @@
 package org.elasticsearch.index.codec.vectors.diskbbq;
 
 import org.apache.lucene.index.FloatVectorValues;
-import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 
 import java.io.IOException;
 
@@ -46,32 +45,6 @@ public sealed interface WriterVectorValues {
         @Override
         public float[] vectorValue(int ord) throws IOException {
             return values.vectorValue(ord);
-        }
-    }
-
-    /**
-     * Byte-backed vector values for non-COSINE byte element_type fields.
-     * Provides native {@code byte[]} access for quantization that avoids
-     * the byte-to-float conversion, while still exposing {@link #vectorValue}
-     * for operations that require float intermediates (e.g. EUCLIDEAN parent
-     * centroid correction).
-     */
-    record ByteValues(KMeansFloatVectorValues values) implements WriterVectorValues {
-        @Override
-        public int ordToDoc(int ord) {
-            return values.ordToDoc(ord);
-        }
-
-        @Override
-        public float[] vectorValue(int ord) throws IOException {
-            return values.vectorValue(ord);
-        }
-
-        /**
-         * Returns the raw byte vector for the given ordinal.
-         */
-        public byte[] byteVectorValue(int ord) throws IOException {
-            return values.byteVectorValue(ord);
         }
     }
 }

@@ -62,6 +62,14 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
     private final int flatVectorThreshold;
     private final boolean shouldWriteDirectIoReads;
     protected final SegmentWriteState segmentWriteState;
+    /**
+     * During flush, holds the raw byte vectors for the current byte-encoded field being processed.
+     * Set before {@link #calculateCentroids(FieldInfo, KMeansFloatVectorValues)} is called and
+     * cleared afterwards. Subclasses can read this to perform native byte clustering.
+     * The list may be reordered if a sort map was applied; entries correspond to the same ordinals
+     * as the paired {@link KMeansFloatVectorValues}.
+     */
+    protected List<byte[]> currentFlushByteVectors;
 
     @SuppressWarnings("this-escape")
     protected IVFVectorsWriter(
@@ -320,6 +328,10 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 @SuppressWarnings("unchecked")
                 final FlatFieldVectorsWriter<byte[]> byteWriter = (FlatFieldVectorsWriter<byte[]>) fieldWriter.delegate;
                 floatVectorValues = getKMeansByteVectorValuesAsFloat(fieldWriter.fieldInfo, byteWriter, maxDoc, sortMap);
+                // Capture the byte vectors in the same order as the float values for native byte clustering.
+                // getKMeansByteVectorValuesAsFloat uses the same list/reordering, so extracting from the writer
+                // gives us the correctly ordered bytes.
+                currentFlushByteVectors = getOrderedByteVectors(byteWriter, maxDoc, sortMap);
             } else {
                 @SuppressWarnings("unchecked")
                 final FlatFieldVectorsWriter<float[]> floatWriter = (FlatFieldVectorsWriter<float[]>) fieldWriter.delegate;
@@ -333,11 +345,16 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             }
 
             // build centroids
-            final CentroidInformation centroidAssignments = floatVectorValues.size() > 0
-                && flatVectorThreshold > 0
-                && floatVectorValues.size() <= flatVectorThreshold
-                    ? buildFlatCentroidAssignments(fieldWriter.fieldInfo, floatVectorValues)
-                    : calculateCentroids(fieldWriter.fieldInfo, floatVectorValues);
+            final CentroidInformation centroidAssignments;
+            try {
+                centroidAssignments = floatVectorValues.size() > 0
+                    && flatVectorThreshold > 0
+                    && floatVectorValues.size() <= flatVectorThreshold
+                        ? buildFlatCentroidAssignments(fieldWriter.fieldInfo, floatVectorValues)
+                        : calculateCentroids(fieldWriter.fieldInfo, floatVectorValues);
+            } finally {
+                currentFlushByteVectors = null;
+            }
             final CentroidSupplier centroidSupplier = createCentroidSupplier(
                 fieldWriter.fieldInfo,
                 centroidAssignments.centroids(),
@@ -486,6 +503,32 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             };
             return KMeansFloatVectorValues.buildFromBytes(orderedVectors, docIds, fieldInfo.getVectorDimension(), false);
         }
+    }
+
+    /**
+     * Returns the byte vectors from a flush writer in the same ordinal order that
+     * {@link #getKMeansByteVectorValuesAsFloat} produces, suitable for native byte clustering.
+     */
+    private static List<byte[]> getOrderedByteVectors(FlatFieldVectorsWriter<byte[]> fieldVectorsWriter, int maxDoc, Sorter.DocMap sortMap)
+        throws IOException {
+        List<byte[]> vectors = fieldVectorsWriter.getVectors();
+        if (sortMap == null) {
+            return vectors;
+        }
+        DocsWithFieldSet newDocsWithField = new DocsWithFieldSet();
+        final int[] ordMap = new int[fieldVectorsWriter.getDocsWithFieldSet().cardinality()];
+        KnnVectorsWriter.mapOldOrdToNewOrd(fieldVectorsWriter.getDocsWithFieldSet(), sortMap, null, ordMap, newDocsWithField);
+        return new AbstractList<>() {
+            @Override
+            public int size() {
+                return vectors.size();
+            }
+
+            @Override
+            public byte[] get(int index) {
+                return vectors.get(ordMap[index]);
+            }
+        };
     }
 
     /**

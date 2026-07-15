@@ -28,18 +28,11 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
     private final VectorSupplier vectors;
     private final DocSupplier docs;
     private final int numVectors;
-    // Non-null when the underlying data is byte-backed, enabling native byte[] quantization
-    private final ByteSupplier byteSupplier;
 
     private KMeansFloatVectorValues(VectorSupplier vectors, DocSupplier docs, int numVectors) {
-        this(vectors, docs, numVectors, null);
-    }
-
-    private KMeansFloatVectorValues(VectorSupplier vectors, DocSupplier docs, int numVectors, ByteSupplier byteSupplier) {
         this.vectors = vectors;
         this.docs = docs;
         this.numVectors = numVectors;
-        this.byteSupplier = byteSupplier;
     }
 
     /**
@@ -106,9 +99,6 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
      * Build an instance backed by on-heap byte vectors. Each byte value [-128, 127] is lazily
      * converted to the corresponding float on {@link #vectorValue(int)}. When {@code normalize}
      * is true (cosine similarity), each converted float vector is L2-normalized.
-     * <p>
-     * Use {@link #isByteBacked()} and {@link #byteVectorValue(int)} to access raw bytes
-     * for native byte quantization without the float conversion overhead.
      */
     public static KMeansFloatVectorValues buildFromBytes(List<byte[]> vectors, int[] docs, int dim, boolean normalize) {
         return buildFromBytes(vectors, docs, dim, normalize, null);
@@ -128,7 +118,7 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
     ) {
         OnHeapByteVectorSupplier byteVectorSupplier = new OnHeapByteVectorSupplier(vectors, dim, normalize, preconditioner);
         DocSupplier docSupplier = docs == null ? null : new OnHeapDocSupplier(docs);
-        return new KMeansFloatVectorValues(byteVectorSupplier, docSupplier, vectors.size(), byteVectorSupplier);
+        return new KMeansFloatVectorValues(byteVectorSupplier, docSupplier, vectors.size());
     }
 
     /**
@@ -152,45 +142,7 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
             RandomAccessInput randomDocs = docs.randomAccessSlice(0, docs.length());
             docSupplier = new OffHeapDocSupplier(docs, randomDocs);
         }
-        return new KMeansFloatVectorValues(byteVectorSupplier, docSupplier, numVectors, byteVectorSupplier);
-    }
-
-    /**
-     * Returns true if the underlying data is byte-backed, enabling native byte[]
-     * quantization via {@link #byteVectorValue(int)}.
-     */
-    public boolean isByteBacked() {
-        return byteSupplier != null;
-    }
-
-    /**
-     * Returns true if this byte-backed instance has preconditioning applied.
-     * When preconditioned, {@link #byteVectorValue(int)} returns raw (un-preconditioned) bytes,
-     * so native byte quantization must NOT be used — callers should use
-     * {@link #vectorValue(int)} which returns the preconditioned float vector.
-     * <p>
-     * Note: even when this returns {@code false}, native byte quantization may still be
-     * inappropriate. For COSINE similarity, {@link #vectorValue(int)} returns L2-normalized
-     * floats which differ from the raw byte values returned by {@link #byteVectorValue(int)}.
-     * Callers must additionally check the similarity function before using the byte path.
-     */
-    public boolean isPreconditioned() {
-        if (vectors instanceof OnHeapByteVectorSupplier s) {
-            return s.preconditioner != null;
-        }
-        if (vectors instanceof OffHeapByteVectorSupplier s) {
-            return s.preconditioner != null;
-        }
-        return false;
-    }
-
-    /**
-     * Returns the raw byte vector for the given ordinal without conversion to float.
-     * Only valid when {@link #isByteBacked()} returns true.
-     */
-    public byte[] byteVectorValue(int ord) throws IOException {
-        assert byteSupplier != null;
-        return byteSupplier.byteVector(ord);
+        return new KMeansFloatVectorValues(byteVectorSupplier, docSupplier, numVectors);
     }
 
     @Override
@@ -201,9 +153,7 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
     @Override
     public ClusteringFloatVectorValues copy() throws IOException {
         VectorSupplier copiedVectors = vectors.copy();
-        // When the vectors supplier also implements ByteSupplier, the copy is the same object
-        ByteSupplier copiedByteSupplier = copiedVectors instanceof ByteSupplier bs ? bs : null;
-        return new KMeansFloatVectorValues(copiedVectors, docs != null ? docs.copy() : null, numVectors, copiedByteSupplier);
+        return new KMeansFloatVectorValues(copiedVectors, docs != null ? docs.copy() : null, numVectors);
     }
 
     @Override
@@ -274,14 +224,7 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
         }
     }
 
-    /**
-     * Provides raw byte[] access for native byte quantization.
-     */
-    private sealed interface ByteSupplier permits OnHeapByteVectorSupplier, OffHeapByteVectorSupplier {
-        byte[] byteVector(int ord) throws IOException;
-    }
-
-    private static final class OnHeapByteVectorSupplier implements VectorSupplier, ByteSupplier {
+    private static final class OnHeapByteVectorSupplier implements VectorSupplier {
         private final List<byte[]> vectors;
         private final int dims;
         private final boolean normalize;
@@ -326,11 +269,6 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
         }
 
         @Override
-        public byte[] byteVector(int ord) {
-            return vectors.get(ord);
-        }
-
-        @Override
         public int dims() {
             return dims;
         }
@@ -341,7 +279,7 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
         }
     }
 
-    private static final class OffHeapByteVectorSupplier implements VectorSupplier, ByteSupplier {
+    private static final class OffHeapByteVectorSupplier implements VectorSupplier {
         private final IndexInput vectors;
         private final int dims;
         private final boolean normalize;
@@ -383,13 +321,6 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
                 VectorUtil.l2normalize(floatScratch);
             }
             return floatScratch;
-        }
-
-        @Override
-        public byte[] byteVector(int ord) throws IOException {
-            vectors.seek((long) ord * dims);
-            vectors.readBytes(byteScratch, 0, dims);
-            return byteScratch;
         }
 
         @Override

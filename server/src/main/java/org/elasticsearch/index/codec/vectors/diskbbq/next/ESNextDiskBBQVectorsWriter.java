@@ -42,6 +42,7 @@ import org.elasticsearch.index.codec.vectors.cluster.CentroidOps;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringFloatVectorValuesSlice;
 import org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans;
+import org.elasticsearch.index.codec.vectors.cluster.KMeansByteVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansNeighbors;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansResult;
@@ -990,6 +991,31 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         if (sliceField != null) {
             // for sliced indexed, we don't cluster the data during flush so we can search our vectors by docId range
             return buildFlatCentroidAssignments(fieldInfo, floatVectorValues);
+        }
+        // For BYTE non-COSINE fields, cluster natively in byte space using SIMD byte distances.
+        // COSINE is rejected at addField so we only need to check encoding here.
+        if (fieldInfo.getVectorEncoding() == VectorEncoding.BYTE && currentFlushByteVectors != null) {
+            int dim = fieldInfo.getVectorDimension();
+            KMeansByteVectorValues byteVectorValues = KMeansByteVectorValues.build(currentFlushByteVectors, null, dim);
+            HierarchicalKMeans<byte[]> byteKMeans = HierarchicalKMeans.ofSerial(CentroidOps.BYTE, dim);
+            KMeansNeighbors<byte[]> kMeansResult = byteKMeans.cluster(byteVectorValues, vectorPerCluster);
+            OverspillAssignments soarOverspill = byteKMeans.computeSoar(
+                byteVectorValues,
+                kMeansResult.result(),
+                kMeansResult.neighborHoods()
+            );
+            if (logger.isDebugEnabled()) {
+                logger.debug("native byte clustering: final centroid count: {}", kMeansResult.centroids().length);
+            }
+            // Widen byte centroids to float for storage (centroids are stored as float for now)
+            float[][] floatCentroids = new float[kMeansResult.centroids().length][dim];
+            for (int i = 0; i < kMeansResult.centroids().length; i++) {
+                byte[] bc = kMeansResult.centroids()[i];
+                for (int d = 0; d < dim; d++) {
+                    floatCentroids[i][d] = bc[d];
+                }
+            }
+            return new CentroidInformation(dim, floatCentroids, kMeansResult.assignments(), soarOverspill);
         }
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         KMeansNeighbors<float[]> kMeansResult = hierarchicalKMeans.cluster(floatVectorValues, vectorPerCluster);

@@ -9,6 +9,7 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq.es95;
 
+import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.KnnVectorValues;
@@ -251,8 +252,14 @@ public class ES950DiskBBQVectorsReader extends IVFVectorsReader<ES950DiskBBQVect
         }
         int dimension = fieldInfo.getVectorDimension();
         int numCentroids = entry.numCentroids();
-        FloatVectorValues vectorValues = getFloatVectorValues(fieldInfo.name);
-        int numVectors = vectorValues != null ? vectorValues.size() : 0;
+        final int numVectors;
+        if (fieldInfo.getVectorEncoding() == VectorEncoding.BYTE) {
+            ByteVectorValues bvv = getByteVectorValues(fieldInfo.name);
+            numVectors = bvv != null ? bvv.size() : 0;
+        } else {
+            FloatVectorValues fvv = getFloatVectorValues(fieldInfo.name);
+            numVectors = fvv != null ? fvv.size() : 0;
+        }
         int[] clusterSizes = new int[numCentroids];
 
         long rawCentroidsSize = (long) numCentroids * dimension * Float.BYTES;
