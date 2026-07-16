@@ -29,6 +29,7 @@ import org.elasticsearch.core.SuppressForbidden;
 import org.elasticsearch.core.WelfordVariance;
 import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
 import org.elasticsearch.index.codec.vectors.cluster.CentroidOps;
+import org.elasticsearch.index.codec.vectors.cluster.ClusteringVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansNeighbors;
@@ -800,9 +801,11 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
     @Override
     public CentroidInformation<float[]> calculateCentroids(
         FieldInfo fieldInfo,
-        KMeansFloatVectorValues floatVectorValues,
+        ClusteringVectorValues<?> vectorValues,
         MergeState mergeState
     ) throws IOException {
+        // Widen byte vectors to float — legacy codecs always cluster in float space
+        KMeansFloatVectorValues floatVectorValues = asFloatVectorValues(fieldInfo, vectorValues);
         // TODO: consider hinting / bootstrapping hierarchical kmeans with the prior segments centroids
         // TODO: for flush we are doing this over the vectors and here centroids which seems duplicative
         // preliminary tests suggest recall is good using only centroids but need to do further evaluation
@@ -821,8 +824,9 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
     }
 
     @Override
-    public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues)
-        throws IOException {
+    public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues) throws IOException {
+        // Widen byte vectors to float — legacy codecs always cluster in float space
+        KMeansFloatVectorValues floatVectorValues = asFloatVectorValues(fieldInfo, vectorValues);
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         return calculateCentroids(hierarchicalKMeans, floatVectorValues, fieldInfo);
     }

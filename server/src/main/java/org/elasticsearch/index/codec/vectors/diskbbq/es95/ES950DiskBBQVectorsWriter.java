@@ -32,6 +32,7 @@ import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
 import org.elasticsearch.index.codec.vectors.cluster.CentroidOps;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringFloatVectorValuesSlice;
+import org.elasticsearch.index.codec.vectors.cluster.ClusteringVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansNeighbors;
@@ -712,9 +713,11 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
     @SuppressWarnings({ "rawtypes", "unchecked" })
     public CentroidInformation<float[]> calculateCentroids(
         FieldInfo fieldInfo,
-        KMeansFloatVectorValues floatVectorValues,
+        ClusteringVectorValues<?> vectorValues,
         MergeState mergeState
     ) throws IOException {
+        // Widen byte vectors to float — legacy codecs always cluster in float space
+        KMeansFloatVectorValues floatVectorValues = asFloatVectorValues(fieldInfo, vectorValues);
         // Gather prior segment statistics for tiered merge strategy selection
         int numSegments = mergeState.knnVectorsReaders.length;
         int[] segmentSizes = new int[numSegments];
@@ -805,8 +808,9 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
 
     @SuppressWarnings({ "unchecked", "rawtypes" })
     @Override
-    public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues)
-        throws IOException {
+    public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues) throws IOException {
+        // Widen byte vectors to float — legacy codecs always cluster in float space
+        KMeansFloatVectorValues floatVectorValues = asFloatVectorValues(fieldInfo, vectorValues);
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         KMeansNeighbors<float[]> kMeansResult = hierarchicalKMeans.cluster(floatVectorValues, vectorPerCluster);
         OverspillAssignments soarOverspill = hierarchicalKMeans.computeSoar(

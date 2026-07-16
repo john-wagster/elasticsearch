@@ -12,7 +12,9 @@ package org.elasticsearch.index.codec.vectors.diskbbq;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * An interface for accessing centroids
@@ -113,7 +115,15 @@ public interface CentroidSupplier {
 
             @Override
             public KMeansFloatVectorValues asKmeansFloatVectorValues() {
-                return KMeansFloatVectorValues.buildFromBytes(Arrays.asList(byteCentroids), null, dims, false);
+                List<float[]> floatCentroids = new ArrayList<>(byteCentroids.length);
+                for (byte[] bc : byteCentroids) {
+                    float[] fc = new float[dims];
+                    for (int d = 0; d < dims; d++) {
+                        fc[d] = bc[d];
+                    }
+                    floatCentroids.add(fc);
+                }
+                return KMeansFloatVectorValues.build(floatCentroids, null, dims);
             }
         };
     }

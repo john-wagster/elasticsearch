@@ -294,8 +294,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             centroidsSlice = centroidSlice.slice("centroids-raw", centroidsOffset, rawCentroidsSize);
             ClusteringVectorValues centroids;
             if (byteBacked) {
-                // Read byte centroids but widen to float for the merge path (TieredMergeStrategy uses CentroidOps.FLOAT)
-                centroids = KMeansFloatVectorValues.buildFromBytes(centroidsSlice, null, numCentroids, dimension, false, null);
+                centroids = KMeansByteVectorValues.build(centroidsSlice, null, numCentroids, dimension);
             } else {
                 centroids = KMeansFloatVectorValues.build(centroidsSlice, null, numCentroids, dimension);
             }
@@ -473,7 +472,9 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             // unused
             int longestPostingList = centroidSlice.readVInt();
             // Centroids are stored as bytes when byteCentroids is set, otherwise as floats.
-            boolean parentsByteBacked = entry.byteCentroids();
+            // However, PARENT centroids (second-level cluster centers) are always stored as floats
+            // since they are arithmetic means of leaf centroids and don't fit in byte range.
+            boolean parentsByteBacked = false;
             int bytesPerComponent = parentsByteBacked ? Byte.BYTES : Float.BYTES;
             IndexInput parentsSlice = centroidSlice.slice(
                 "parents-slice",

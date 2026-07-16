@@ -26,6 +26,7 @@ import org.elasticsearch.core.WelfordVariance;
 import org.elasticsearch.index.codec.vectors.BQVectorUtils;
 import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
 import org.elasticsearch.index.codec.vectors.cluster.CentroidOps;
+import org.elasticsearch.index.codec.vectors.cluster.ClusteringVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansNeighbors;
@@ -658,19 +659,16 @@ public class ES920DiskBBQVectorsWriter extends IVFVectorsWriter<ES920DiskBBQVect
     @Override
     public CentroidInformation<float[]> calculateCentroids(
         FieldInfo fieldInfo,
-        KMeansFloatVectorValues floatVectorValues,
+        ClusteringVectorValues<?> vectorValues,
         MergeState mergeState
     ) throws IOException {
-        // 9.2 indices intentionally do not participate in the tiered merge strategy: the on-disk
-        // layout would require a bespoke streaming centroid reader to surface priors, and the
-        // payoff (a transitional format that ages out) does not justify the added complexity.
-        // Fall back to the standard hierarchical rebuild so the 9.2 path stays minimal.
-        return calculateCentroids(fieldInfo, floatVectorValues);
+        return calculateCentroids(fieldInfo, vectorValues);
     }
 
     @Override
-    public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues)
-        throws IOException {
+    public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues) throws IOException {
+        // Widen byte vectors to float — legacy codecs always cluster in float space
+        KMeansFloatVectorValues floatVectorValues = asFloatVectorValues(fieldInfo, vectorValues);
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         return calculateCentroids(hierarchicalKMeans, floatVectorValues, fieldInfo);
     }

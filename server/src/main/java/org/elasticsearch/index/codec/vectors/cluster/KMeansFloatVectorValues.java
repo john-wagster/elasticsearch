@@ -12,9 +12,7 @@ package org.elasticsearch.index.codec.vectors.cluster;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
-import org.apache.lucene.util.VectorUtil;
 import org.elasticsearch.core.Nullable;
-import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -95,56 +93,6 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
         return new KMeansFloatVectorValues(vectorSupplier, docSupplier, numVectors);
     }
 
-    /**
-     * Build an instance backed by on-heap byte vectors. Each byte value [-128, 127] is lazily
-     * converted to the corresponding float on {@link #vectorValue(int)}. When {@code normalize}
-     * is true (cosine similarity), each converted float vector is L2-normalized.
-     */
-    public static KMeansFloatVectorValues buildFromBytes(List<byte[]> vectors, int[] docs, int dim, boolean normalize) {
-        return buildFromBytes(vectors, docs, dim, normalize, null);
-    }
-
-    /**
-     * Build an instance backed by on-heap byte vectors with optional preconditioning.
-     * When a {@code preconditioner} is provided, the rotation is applied lazily during
-     * {@link #vectorValue(int)} after the byte-to-float conversion.
-     */
-    public static KMeansFloatVectorValues buildFromBytes(
-        List<byte[]> vectors,
-        int[] docs,
-        int dim,
-        boolean normalize,
-        Preconditioner preconditioner
-    ) {
-        OnHeapByteVectorSupplier byteVectorSupplier = new OnHeapByteVectorSupplier(vectors, dim, normalize, preconditioner);
-        DocSupplier docSupplier = docs == null ? null : new OnHeapDocSupplier(docs);
-        return new KMeansFloatVectorValues(byteVectorSupplier, docSupplier, vectors.size());
-    }
-
-    /**
-     * Builds an instance from off-heap byte vectors with optional preconditioning.
-     * When a {@code preconditioner} is provided, the rotation is applied lazily during
-     * {@link #vectorValue(int)} after the byte-to-float conversion.
-     */
-    public static KMeansFloatVectorValues buildFromBytes(
-        IndexInput vectors,
-        IndexInput docs,
-        int numVectors,
-        int dims,
-        boolean normalize,
-        Preconditioner preconditioner
-    ) throws IOException {
-        OffHeapByteVectorSupplier byteVectorSupplier = new OffHeapByteVectorSupplier(vectors, dims, normalize, preconditioner);
-        DocSupplier docSupplier;
-        if (docs == null) {
-            docSupplier = null;
-        } else {
-            RandomAccessInput randomDocs = docs.randomAccessSlice(0, docs.length());
-            docSupplier = new OffHeapDocSupplier(docs, randomDocs);
-        }
-        return new KMeansFloatVectorValues(byteVectorSupplier, docSupplier, numVectors);
-    }
-
     @Override
     public float[] vectorValue(int ord) throws IOException {
         return vectors.vector(ord);
@@ -176,8 +124,7 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
         return docs == null ? ord : docs.ordToDoc(ord);
     }
 
-    private sealed interface VectorSupplier permits OffHeapVectorSupplier, OnHeapVectorSupplier, OffHeapByteVectorSupplier,
-        OnHeapByteVectorSupplier, FloatVectorValuesSupplier {
+    private sealed interface VectorSupplier permits OffHeapVectorSupplier, OnHeapVectorSupplier, FloatVectorValuesSupplier {
 
         float[] vector(int ord) throws IOException;
 
@@ -221,116 +168,6 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
         @Override
         public VectorSupplier copy() {
             return new OffHeapVectorSupplier(vectors.clone(), vector.clone(), vectorLength);
-        }
-    }
-
-    private static final class OnHeapByteVectorSupplier implements VectorSupplier {
-        private final List<byte[]> vectors;
-        private final int dims;
-        private final boolean normalize;
-        private final Preconditioner preconditioner;
-        private final float[] floatScratch;
-        // When preconditioner is non-null, we need a second scratch for the rotation output
-        private final float[] preconditionedScratch;
-
-        OnHeapByteVectorSupplier(List<byte[]> vectors, int dims, boolean normalize, Preconditioner preconditioner) {
-            this.vectors = vectors;
-            this.dims = dims;
-            this.normalize = normalize;
-            this.preconditioner = preconditioner;
-            this.floatScratch = new float[dims];
-            this.preconditionedScratch = preconditioner != null ? new float[dims] : null;
-        }
-
-        @Override
-        public float[] vector(int ord) {
-            byte[] bytes = vectors.get(ord);
-            if (preconditioner != null) {
-                if (normalize) {
-                    // Convert byte→float, normalize, then apply preconditioner
-                    for (int i = 0; i < bytes.length; i++) {
-                        floatScratch[i] = bytes[i];
-                    }
-                    VectorUtil.l2normalize(floatScratch);
-                    preconditioner.applyTransform(floatScratch, preconditionedScratch);
-                } else {
-                    // Apply preconditioner directly on byte[] (avoids intermediate float[] copy)
-                    preconditioner.applyTransform(bytes, preconditionedScratch);
-                }
-                return preconditionedScratch;
-            }
-            for (int i = 0; i < bytes.length; i++) {
-                floatScratch[i] = bytes[i];
-            }
-            if (normalize) {
-                VectorUtil.l2normalize(floatScratch);
-            }
-            return floatScratch;
-        }
-
-        @Override
-        public int dims() {
-            return dims;
-        }
-
-        @Override
-        public VectorSupplier copy() {
-            return new OnHeapByteVectorSupplier(vectors, dims, normalize, preconditioner);
-        }
-    }
-
-    private static final class OffHeapByteVectorSupplier implements VectorSupplier {
-        private final IndexInput vectors;
-        private final int dims;
-        private final boolean normalize;
-        private final Preconditioner preconditioner;
-        private final byte[] byteScratch;
-        private final float[] floatScratch;
-        private final float[] preconditionedScratch;
-
-        OffHeapByteVectorSupplier(IndexInput vectors, int dims, boolean normalize, Preconditioner preconditioner) {
-            this.vectors = vectors;
-            this.dims = dims;
-            this.normalize = normalize;
-            this.preconditioner = preconditioner;
-            this.byteScratch = new byte[dims];
-            this.floatScratch = new float[dims];
-            this.preconditionedScratch = preconditioner != null ? new float[dims] : null;
-        }
-
-        @Override
-        public float[] vector(int ord) throws IOException {
-            vectors.seek((long) ord * dims);
-            vectors.readBytes(byteScratch, 0, dims);
-            if (preconditioner != null) {
-                if (normalize) {
-                    for (int i = 0; i < dims; i++) {
-                        floatScratch[i] = byteScratch[i];
-                    }
-                    VectorUtil.l2normalize(floatScratch);
-                    preconditioner.applyTransform(floatScratch, preconditionedScratch);
-                } else {
-                    preconditioner.applyTransform(byteScratch, preconditionedScratch);
-                }
-                return preconditionedScratch;
-            }
-            for (int i = 0; i < dims; i++) {
-                floatScratch[i] = byteScratch[i];
-            }
-            if (normalize) {
-                VectorUtil.l2normalize(floatScratch);
-            }
-            return floatScratch;
-        }
-
-        @Override
-        public int dims() {
-            return dims;
-        }
-
-        @Override
-        public VectorSupplier copy() {
-            return new OffHeapByteVectorSupplier(vectors.clone(), dims, normalize, preconditioner);
         }
     }
 
