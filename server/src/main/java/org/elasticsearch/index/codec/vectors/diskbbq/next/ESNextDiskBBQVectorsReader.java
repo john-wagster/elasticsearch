@@ -168,7 +168,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 acceptDocs,
                 approximateCost,
                 values,
-                visitRatio
+                visitRatio,
+                fieldEntry.byteCentroids()
             ).getIterator();
         };
         return getPostingListPrefetchIterator(iterator, postingListSlice);
@@ -203,6 +204,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             maxSliceSize = input.readVInt();
         }
         float rescoreOversample = Float.intBitsToFloat(input.readInt());
+        boolean byteCentroids = input.readByte() == 1;
         return new NextFieldEntry(
             rawVectorFormat,
             useDirectIOReads,
@@ -222,7 +224,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             preconditionerLength,
             numSlices,
             maxSliceSize,
-            rescoreOversample
+            rescoreOversample,
+            byteCentroids
         );
     }
 
@@ -267,12 +270,9 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         int numVectors = vectorValues != null ? vectorValues.size() : 0;
         int[] clusterSizes = new int[numCentroids];
 
-        // Byte-backed fields (non-COSINE) store centroids as 1 byte per dimension;
-        // float-backed and COSINE byte fields store centroids as 4 bytes (float) per dimension.
-        // Centroids are currently always stored as floats (4 bytes/dim), even for byte-encoded fields.
-        // The writer widens byte vectors to float for centroid storage. When native byte centroid
-        // storage is added to the ESNext writer, this flag will be derived from the on-disk format.
-        boolean byteBacked = false;
+        // Byte-backed fields store centroids as 1 byte per dimension;
+        // float-backed fields store centroids as 4 bytes (float) per dimension.
+        boolean byteBacked = entry.byteCentroids();
         int bytesPerComponent = byteBacked ? Byte.BYTES : Float.BYTES;
         long rawCentroidsSize = (long) numCentroids * dimension * bytesPerComponent;
 
@@ -294,7 +294,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             centroidsSlice = centroidSlice.slice("centroids-raw", centroidsOffset, rawCentroidsSize);
             ClusteringVectorValues centroids;
             if (byteBacked) {
-                centroids = KMeansByteVectorValues.build(centroidsSlice, null, numCentroids, dimension);
+                // Read byte centroids but widen to float for the merge path (TieredMergeStrategy uses CentroidOps.FLOAT)
+                centroids = KMeansFloatVectorValues.buildFromBytes(centroidsSlice, null, numCentroids, dimension, false, null);
             } else {
                 centroids = KMeansFloatVectorValues.build(centroidsSlice, null, numCentroids, dimension);
             }
@@ -346,6 +347,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         final int numSlices;
         final int maxSliceSize;
         private final float rescoreOversample;
+        private final boolean byteCentroids;
 
         NextFieldEntry(
             String rawVectorFormat,
@@ -366,7 +368,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             long preconditionerLength,
             int numSlices,
             int maxSliceSize,
-            float rescoreOversample
+            float rescoreOversample,
+            boolean byteCentroids
         ) {
             super(
                 rawVectorFormat,
@@ -389,6 +392,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             this.numSlices = numSlices;
             this.maxSliceSize = maxSliceSize;
             this.rescoreOversample = rescoreOversample;
+            this.byteCentroids = byteCentroids;
         }
 
         public CentroidIndexFormat centroidIndexFormat() {
@@ -409,6 +413,10 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
 
         public float rescoreOversample() {
             return rescoreOversample;
+        }
+
+        public boolean byteCentroids() {
+            return byteCentroids;
         }
 
         @Override
@@ -464,8 +472,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         if (numParents > 0) {
             // unused
             int longestPostingList = centroidSlice.readVInt();
-            // Centroids are currently always stored as floats, even for byte-encoded fields.
-            boolean parentsByteBacked = false;
+            // Centroids are stored as bytes when byteCentroids is set, otherwise as floats.
+            boolean parentsByteBacked = entry.byteCentroids();
             int bytesPerComponent = parentsByteBacked ? Byte.BYTES : Float.BYTES;
             IndexInput parentsSlice = centroidSlice.slice(
                 "parents-slice",

@@ -710,8 +710,11 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
     @Override
     @SuppressForbidden(reason = "require usage of Lucene's IOUtils#closeWhileHandlingException(...)")
     @SuppressWarnings({ "rawtypes", "unchecked" })
-    public CentroidInformation calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues, MergeState mergeState)
-        throws IOException {
+    public CentroidInformation<float[]> calculateCentroids(
+        FieldInfo fieldInfo,
+        KMeansFloatVectorValues floatVectorValues,
+        MergeState mergeState
+    ) throws IOException {
         // Gather prior segment statistics for tiered merge strategy selection
         int numSegments = mergeState.knnVectorsReaders.length;
         int[] segmentSizes = new int[numSegments];
@@ -800,8 +803,10 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
         }
     }
 
+    @SuppressWarnings({ "unchecked", "rawtypes" })
     @Override
-    public CentroidInformation calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues) throws IOException {
+    public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues)
+        throws IOException {
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         KMeansNeighbors<float[]> kMeansResult = hierarchicalKMeans.cluster(floatVectorValues, vectorPerCluster);
         OverspillAssignments soarOverspill = hierarchicalKMeans.computeSoar(

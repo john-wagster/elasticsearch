@@ -798,8 +798,11 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
     }
 
     @Override
-    public CentroidInformation calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues, MergeState mergeState)
-        throws IOException {
+    public CentroidInformation<float[]> calculateCentroids(
+        FieldInfo fieldInfo,
+        KMeansFloatVectorValues floatVectorValues,
+        MergeState mergeState
+    ) throws IOException {
         // TODO: consider hinting / bootstrapping hierarchical kmeans with the prior segments centroids
         // TODO: for flush we are doing this over the vectors and here centroids which seems duplicative
         // preliminary tests suggest recall is good using only centroids but need to do further evaluation
@@ -818,12 +821,14 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
     }
 
     @Override
-    public CentroidInformation calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues) throws IOException {
+    public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues)
+        throws IOException {
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         return calculateCentroids(hierarchicalKMeans, floatVectorValues, fieldInfo);
     }
 
-    private CentroidInformation calculateCentroids(
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    private CentroidInformation<float[]> calculateCentroids(
         HierarchicalKMeans<float[]> hierarchicalKMeans,
         KMeansFloatVectorValues floatVectorValues,
         FieldInfo fieldInfo

@@ -21,7 +21,7 @@ public class CentroidAssignmentsTests extends ESTestCase {
         int[] assignments = new int[] { 0, 1, 2, 0, 1 };
         int[] overspill = new int[] { 1, 0, 1, 2, 0 };
 
-        CentroidInformation ci = new CentroidInformation(dims, centroids, assignments, new SoarAssignments(overspill));
+        CentroidInformation<float[]> ci = new CentroidInformation<>(dims, centroids, assignments, new SoarAssignments(overspill));
 
         assertEquals(3, ci.numCentroids());
         assertSame(centroids, ci.centroids());
@@ -33,7 +33,7 @@ public class CentroidAssignmentsTests extends ESTestCase {
         float[][] centroids = new float[][] { { 10, 20, 30 }, { -10, -20, -30 } };
         int[] assignments = new int[] { 0, 1 };
 
-        CentroidInformation ci = new CentroidInformation(dims, centroids, assignments, OverspillAssignments.NONE);
+        CentroidInformation<float[]> ci = new CentroidInformation<>(dims, centroids, assignments, OverspillAssignments.NONE);
 
         float[] globalCentroid = ci.globalCentroid();
         assertNotNull(globalCentroid);
@@ -49,7 +49,7 @@ public class CentroidAssignmentsTests extends ESTestCase {
         float[][] centroids = new float[][] { { 10, 20 }, { 30, 40 }, { 50, 60 } };
         int[] assignments = new int[] { 0, 1, 2 };
 
-        CentroidInformation ci = new CentroidInformation(dims, centroids, assignments, OverspillAssignments.NONE);
+        CentroidInformation<float[]> ci = new CentroidInformation<>(dims, centroids, assignments, OverspillAssignments.NONE);
 
         float[] globalCentroid = ci.globalCentroid();
         // Mean: (10+30+50)/3 = 30, (20+40+60)/3 = 40
@@ -62,7 +62,7 @@ public class CentroidAssignmentsTests extends ESTestCase {
         float[][] centroids = new float[0][];
         int[] assignments = new int[0];
 
-        CentroidInformation ci = new CentroidInformation(dims, centroids, assignments, OverspillAssignments.NONE);
+        CentroidInformation<float[]> ci = new CentroidInformation<>(dims, centroids, assignments, OverspillAssignments.NONE);
 
         assertEquals(0, ci.numCentroids());
         assertEquals(0, ci.centroids().length);
@@ -73,7 +73,7 @@ public class CentroidAssignmentsTests extends ESTestCase {
         float[][] centroids = new float[][] { { 10, 20, 30, 40, 50 } };
         int[] assignments = new int[] { 0, 0, 0 };
 
-        CentroidInformation ci = new CentroidInformation(dims, centroids, assignments, OverspillAssignments.NONE);
+        CentroidInformation<float[]> ci = new CentroidInformation<>(dims, centroids, assignments, OverspillAssignments.NONE);
 
         assertEquals(1, ci.numCentroids());
         // Global centroid = the single centroid itself
@@ -89,7 +89,7 @@ public class CentroidAssignmentsTests extends ESTestCase {
         int[] overspill = new int[] { 1, 1, 0, 0 };
         CentroidSlices slices = new CentroidSlices(new int[] { 0, 2 }, new int[] { 2, 2 });
 
-        CentroidInformation ci = new CentroidInformation(dims, centroids, assignments, new SoarAssignments(overspill), slices);
+        CentroidInformation<float[]> ci = new CentroidInformation<>(dims, centroids, assignments, new SoarAssignments(overspill), slices);
 
         assertEquals(2, ci.numCentroids());
         assertSame(slices, ci.centroidAssignments().centroidSlices());

@@ -71,6 +71,13 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
      */
     protected List<byte[]> currentFlushByteVectors;
 
+    /**
+     * Set to {@code true} during flush when byte-native centroids are being written.
+     * Subclass {@code doWriteMeta} implementations may read this to persist a byte-backed flag.
+     * Reset to {@code false} after {@code writeMeta} completes.
+     */
+    protected boolean byteCentroids = false;
+
     @SuppressWarnings("this-escape")
     protected IVFVectorsWriter(
         SegmentWriteState state,
@@ -130,7 +137,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
      * @return centroid information
      * @throws IOException if an I/O error occurs
      */
-    public abstract CentroidInformation calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues)
+    public abstract CentroidInformation<?> calculateCentroids(FieldInfo fieldInfo, KMeansFloatVectorValues floatVectorValues)
         throws IOException;
 
     /**
@@ -142,7 +149,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
      * @return centroid information
      * @throws IOException if an I/O error occurs
      */
-    public abstract CentroidInformation calculateCentroids(
+    public abstract CentroidInformation<?> calculateCentroids(
         FieldInfo fieldInfo,
         KMeansFloatVectorValues floatVectorValues,
         MergeState mergeState
@@ -274,6 +281,32 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
      */
     public abstract CentroidSupplier createCentroidSupplier(FieldInfo info, float[][] centroids, float[] globalCentroid) throws IOException;
 
+    /**
+     * Creates a {@link CentroidSupplier} from byte centroids. Codec versions that do not support
+     * byte-native postings should leave this default (throws).
+     */
+    protected CentroidSupplier createCentroidSupplier(FieldInfo info, byte[][] centroids, float[] globalCentroid) throws IOException {
+        throw new UnsupportedOperationException("Byte centroid supplier not supported by this codec version");
+    }
+
+    /**
+     * Builds and writes byte-native posting lists. Codec versions that do not support byte-native
+     * postings should leave this default (throws).
+     */
+    protected CentroidOffsetAndLength buildAndWriteBytePostingsLists(
+        FieldInfo fieldInfo,
+        CentroidSupplier centroidSupplier,
+        List<byte[]> byteVectors,
+        int[] docIds,
+        IndexOutput postingsOutput,
+        long fileOffset,
+        int[] assignments,
+        OverspillAssignments overspillAssignments,
+        IvfSegmentConfig ivfSegmentConfig
+    ) throws IOException {
+        throw new UnsupportedOperationException("Byte-native postings not supported by this codec version");
+    }
+
     protected abstract Preconditioner inheritPreconditioner(FieldInfo fieldInfo, MergeState mergeState, IvfSegmentConfig ivfSegmentConfig)
         throws IOException;
 
@@ -345,7 +378,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             }
 
             // build centroids
-            final CentroidInformation centroidAssignments;
+            final CentroidInformation<?> centroidAssignments;
             try {
                 centroidAssignments = floatVectorValues.size() > 0
                     && flatVectorThreshold > 0
@@ -355,32 +388,61 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             } finally {
                 currentFlushByteVectors = null;
             }
-            final CentroidSupplier centroidSupplier = createCentroidSupplier(
-                fieldWriter.fieldInfo,
-                centroidAssignments.centroids(),
-                centroidAssignments.globalCentroid()
-            );
 
-            // write initial centroid index (we might need to read it later for overspilling)
-            final long centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
-            CI centroidIndex = writeCentroidIndex(centroidSupplier, centroidAssignments.assignments(), ivfCentroids);
+            final CentroidOffsetAndLength centroidOffsetAndLength;
+            final CentroidSupplier centroidSupplier;
+            final long centroidOffset;
+            final CI centroidIndex;
+            final long postingListOffset;
+            final long postingListLength;
+            final float[] globalCentroid = centroidAssignments.globalCentroid();
 
-            // write posting lists
-            final long postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
-            final CentroidOffsetAndLength centroidOffsetAndLength = buildAndWritePostingsLists(
-                fieldWriter.fieldInfo,
-                centroidSupplier,
-                floatVectorValues,
-                ivfClusters,
-                postingListOffset,
-                centroidAssignments.assignments(),
-                centroidAssignments.overspillAssignments(),
-                ivfSegmentConfig
-            );
-            final long postingListLength = ivfClusters.getFilePointer() - postingListOffset;
+            if (isByte && centroidAssignments.centroids() instanceof byte[][] byteCentroidArrays) {
+                byteCentroids = true;
+                centroidSupplier = createCentroidSupplier(fieldWriter.fieldInfo, byteCentroidArrays, globalCentroid);
+                centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
+                centroidIndex = writeCentroidIndex(centroidSupplier, centroidAssignments.assignments(), ivfCentroids);
+                postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
+
+                @SuppressWarnings("unchecked")
+                final FlatFieldVectorsWriter<byte[]> byteWriter = (FlatFieldVectorsWriter<byte[]>) fieldWriter.delegate;
+                List<byte[]> orderedByteVectors = getOrderedByteVectors(byteWriter, maxDoc, sortMap);
+                int[] docIds = getOrderedDocIds(fieldWriter.fieldInfo, byteWriter, maxDoc, sortMap);
+
+                centroidOffsetAndLength = buildAndWriteBytePostingsLists(
+                    fieldWriter.fieldInfo,
+                    centroidSupplier,
+                    orderedByteVectors,
+                    docIds,
+                    ivfClusters,
+                    postingListOffset,
+                    centroidAssignments.assignments(),
+                    centroidAssignments.overspillAssignments(),
+                    ivfSegmentConfig
+                );
+                postingListLength = ivfClusters.getFilePointer() - postingListOffset;
+            } else {
+                byteCentroids = false;
+                @SuppressWarnings("unchecked")
+                CentroidInformation<float[]> floatCentroidInfo = (CentroidInformation<float[]>) centroidAssignments;
+                centroidSupplier = createCentroidSupplier(fieldWriter.fieldInfo, floatCentroidInfo.centroids(), globalCentroid);
+                centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
+                centroidIndex = writeCentroidIndex(centroidSupplier, centroidAssignments.assignments(), ivfCentroids);
+                postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
+                centroidOffsetAndLength = buildAndWritePostingsLists(
+                    fieldWriter.fieldInfo,
+                    centroidSupplier,
+                    floatVectorValues,
+                    ivfClusters,
+                    postingListOffset,
+                    centroidAssignments.assignments(),
+                    centroidAssignments.overspillAssignments(),
+                    ivfSegmentConfig
+                );
+                postingListLength = ivfClusters.getFilePointer() - postingListOffset;
+            }
 
             // write the rest of the centroid data now we know the size of the postings
-            final float[] globalCentroid = centroidAssignments.globalCentroid();
             writeCentroidData(
                 fieldWriter.fieldInfo,
                 centroidSupplier,
@@ -410,6 +472,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 0,
                 ivfSegmentConfig
             );
+            byteCentroids = false;
         }
     }
 
@@ -532,6 +595,41 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
     }
 
     /**
+     * Returns the document IDs for byte vectors in the same ordinal order as
+     * {@link #getOrderedByteVectors}, or {@code null} when the segment is dense and unsorted.
+     */
+    private static int[] getOrderedDocIds(
+        FieldInfo fieldInfo,
+        FlatFieldVectorsWriter<byte[]> fieldVectorsWriter,
+        int maxDoc,
+        Sorter.DocMap sortMap
+    ) throws IOException {
+        List<byte[]> vectors = fieldVectorsWriter.getVectors();
+        if (vectors.size() == maxDoc && sortMap == null) {
+            return null; // dense, ordinal == docId
+        } else if (sortMap == null) {
+            final DocIdSetIterator iterator = fieldVectorsWriter.getDocsWithFieldSet().iterator();
+            final int[] docIds = new int[vectors.size()];
+            for (int i = 0; i < docIds.length; i++) {
+                docIds[i] = iterator.nextDoc();
+            }
+            assert iterator.nextDoc() == NO_MORE_DOCS;
+            return docIds;
+        } else {
+            DocsWithFieldSet newDocsWithField = new DocsWithFieldSet();
+            final int[] ordMap = new int[fieldVectorsWriter.getDocsWithFieldSet().cardinality()];
+            KnnVectorsWriter.mapOldOrdToNewOrd(fieldVectorsWriter.getDocsWithFieldSet(), sortMap, null, ordMap, newDocsWithField);
+            final DocIdSetIterator iterator = newDocsWithField.iterator();
+            final int[] docIds = new int[vectors.size()];
+            for (int i = 0; i < docIds.length; i++) {
+                docIds[i] = iterator.nextDoc();
+            }
+            assert iterator.nextDoc() == NO_MORE_DOCS;
+            return docIds;
+        }
+    }
+
+    /**
      * Builds a flat centroid assignment for a small set of vectors.
      * <p>
      * When the number of vectors is below the IVF flush threshold, we do not
@@ -544,7 +642,8 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
      * @return a {@link CentroidAssignments} instance with one centroid and
      *         all vectors assigned to it
      */
-    protected final CentroidInformation buildFlatCentroidAssignments(FieldInfo fieldInfo, FloatVectorValues floatVectorValues)
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    protected final CentroidInformation<float[]> buildFlatCentroidAssignments(FieldInfo fieldInfo, FloatVectorValues floatVectorValues)
         throws IOException {
         int dimension = fieldInfo.getVectorDimension();
         int count = floatVectorValues.size();
@@ -728,10 +827,13 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             try {
                 centroidTemp = mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "civf_", IOContext.DEFAULT);
                 centroidTempName = centroidTemp.getName();
-                CentroidInformation centroidAssignments = calculateCentroids(fieldInfo, floatVectorValues, mergeState);
+                CentroidInformation<?> centroidAssignments = calculateCentroids(fieldInfo, floatVectorValues, mergeState);
                 // write the centroids to a temporary file so we are not holding them on heap
+                // Merge always produces float centroids
+                @SuppressWarnings("unchecked")
+                CentroidInformation<float[]> floatCentroidAssignments = (CentroidInformation<float[]>) centroidAssignments;
                 final ByteBuffer buffer = ByteBuffer.allocate(fieldInfo.getVectorDimension() * Float.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-                for (float[] centroid : centroidAssignments.centroids()) {
+                for (float[] centroid : floatCentroidAssignments.centroids()) {
                     buffer.asFloatBuffer().put(centroid);
                     centroidTemp.writeBytes(buffer.array(), buffer.array().length);
                 }
