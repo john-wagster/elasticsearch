@@ -600,7 +600,8 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
         long preconditionerLength,
         int numberOfSlices,
         int maxSliceSize,
-        IvfSegmentConfig ivfSegmentConfig
+        IvfSegmentConfig ivfSegmentConfig,
+        boolean byteCentroids
     ) throws IOException {
         metaOutput.writeInt(ES940OSQVectorsScorer.BULK_SIZE);
         metaOutput.writeInt(quantEncoding.id());
@@ -805,7 +806,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
         MergeState mergeState
     ) throws IOException {
         // Widen byte vectors to float — legacy codecs always cluster in float space
-        KMeansFloatVectorValues floatVectorValues = asFloatVectorValues(fieldInfo, vectorValues);
+        KMeansFloatVectorValues floatVectorValues = (KMeansFloatVectorValues) vectorValues;
         // TODO: consider hinting / bootstrapping hierarchical kmeans with the prior segments centroids
         // TODO: for flush we are doing this over the vectors and here centroids which seems duplicative
         // preliminary tests suggest recall is good using only centroids but need to do further evaluation
@@ -826,12 +827,11 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
     @Override
     public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues) throws IOException {
         // Widen byte vectors to float — legacy codecs always cluster in float space
-        KMeansFloatVectorValues floatVectorValues = asFloatVectorValues(fieldInfo, vectorValues);
+        KMeansFloatVectorValues floatVectorValues = (KMeansFloatVectorValues) vectorValues;
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         return calculateCentroids(hierarchicalKMeans, floatVectorValues, fieldInfo);
     }
 
-    @SuppressWarnings({ "unchecked", "rawtypes" })
     private CentroidInformation<float[]> calculateCentroids(
         HierarchicalKMeans<float[]> hierarchicalKMeans,
         KMeansFloatVectorValues floatVectorValues,
@@ -848,7 +848,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
             logger.debug("final centroid count: {}", centroids.length);
         }
         int[] assignments = kMeansResult.assignments();
-        return new CentroidInformation(fieldInfo.getVectorDimension(), centroids, assignments, soarOverspill);
+        return CentroidInformation.ofFloat(fieldInfo.getVectorDimension(), centroids, assignments, soarOverspill);
     }
 
     static void writeQuantizedValue(IndexOutput indexOutput, byte[] binaryValue, OptimizedScalarQuantizer.QuantizationResult corrections)

@@ -68,11 +68,11 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
     protected final SegmentWriteState segmentWriteState;
 
     /**
-     * Set to {@code true} during flush when byte-native centroids are being written.
-     * Subclass {@code doWriteMeta} implementations may read this to persist a byte-backed flag.
-     * Reset to {@code false} after {@code writeMeta} completes.
+     * Returns {@code true} if this codec version supports byte-native clustering and postings.
      */
-    protected boolean byteCentroids = false;
+    protected boolean supportsByteNative() {
+        return false;
+    }
 
     @SuppressWarnings("this-escape")
     protected IVFVectorsWriter(
@@ -373,16 +373,24 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             Preconditioner preconditioner = createPreconditioner(fieldWriter.fieldInfo().getVectorDimension(), ivfSegmentConfig);
             if (fieldWriter.delegate == null) {
                 // field encoding is not supported, we just write meta information
-                writeMeta(fieldWriter.fieldInfo, 0, 0, 0, 0, 0, null, 0, 0, 0, 0, ivfSegmentConfig);
+                writeMeta(fieldWriter.fieldInfo, 0, 0, 0, 0, 0, null, 0, 0, 0, 0, ivfSegmentConfig, false);
                 continue;
             }
             // build a float vector values with random access
             final boolean isByte = fieldWriter.fieldInfo.getVectorEncoding() == VectorEncoding.BYTE;
             final ClusteringVectorValues<?> clusteringVectorValues;
-            if (isByte) {
+            if (isByte && supportsByteNative()) {
                 @SuppressWarnings("unchecked")
                 final FlatFieldVectorsWriter<byte[]> byteWriter = (FlatFieldVectorsWriter<byte[]>) fieldWriter.delegate;
-                clusteringVectorValues = getKMeansByteVectorValues(fieldWriter.fieldInfo, byteWriter, maxDoc, sortMap);
+                KMeansByteVectorValues byteVals = getKMeansByteVectorValues(fieldWriter.fieldInfo, byteWriter, maxDoc, sortMap);
+                if (preconditioner != null) {
+                    byteVals = preconditionByteVectors(byteVals, preconditioner);
+                }
+                clusteringVectorValues = byteVals;
+            } else if (isByte) {
+                // Legacy codecs don't support byte IVF indexing — skip and write empty meta
+                writeMeta(fieldWriter.fieldInfo, 0, 0, 0, 0, 0, null, 0, 0, 0, 0, ivfSegmentConfig, false);
+                continue;
             } else {
                 @SuppressWarnings("unchecked")
                 final FlatFieldVectorsWriter<float[]> floatWriter = (FlatFieldVectorsWriter<float[]>) fieldWriter.delegate;
@@ -411,8 +419,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             final long postingListLength;
             final float[] globalCentroid = centroidAssignments.globalCentroid();
 
-            if (isByte && centroidAssignments.centroids() instanceof byte[][] byteCentroidArrays) {
-                byteCentroids = true;
+            if (supportsByteNative() && centroidAssignments.centroids() instanceof byte[][] byteCentroidArrays) {
                 centroidSupplier = createCentroidSupplier(fieldWriter.fieldInfo, byteCentroidArrays, globalCentroid);
                 centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
                 centroidIndex = writeCentroidIndex(centroidSupplier, centroidAssignments.assignments(), ivfCentroids);
@@ -430,7 +437,6 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 );
                 postingListLength = ivfClusters.getFilePointer() - postingListOffset;
             } else {
-                byteCentroids = false;
                 @SuppressWarnings("unchecked")
                 CentroidInformation<float[]> floatCentroidInfo = (CentroidInformation<float[]>) centroidAssignments;
                 centroidSupplier = createCentroidSupplier(fieldWriter.fieldInfo, floatCentroidInfo.centroids(), globalCentroid);
@@ -485,9 +491,9 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 preconditionerLength,
                 0,
                 0,
-                ivfSegmentConfig
+                ivfSegmentConfig,
+                supportsByteNative() && centroidAssignments.centroids() instanceof byte[][]
             );
-            byteCentroids = false;
         }
     }
 
@@ -578,6 +584,23 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         }
     }
 
+    private static KMeansByteVectorValues preconditionByteVectors(KMeansByteVectorValues byteVals, Preconditioner preconditioner)
+        throws IOException {
+        int size = byteVals.size();
+        int dim = byteVals.dimension();
+        float[] scratch = new float[dim];
+        List<byte[]> preconditioned = new ArrayList<>(size);
+        int[] docs = new int[size];
+        for (int i = 0; i < size; i++) {
+            byte[] vector = byteVals.vectorValue(i);
+            byte[] out = new byte[dim];
+            preconditioner.applyTransformToBytes(vector, out, scratch);
+            preconditioned.add(out);
+            docs[i] = byteVals.ordToDoc(i);
+        }
+        return KMeansByteVectorValues.build(preconditioned, docs, dim);
+    }
+
     /**
      * Builds a flat centroid assignment for a small set of vectors.
      * <p>
@@ -591,7 +614,6 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
      * @return a {@link CentroidAssignments} instance with one centroid and
      *         all vectors assigned to it
      */
-    @SuppressWarnings({ "unchecked", "rawtypes" })
     protected final CentroidInformation<float[]> buildFlatCentroidAssignments(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues)
         throws IOException {
         int dimension = fieldInfo.getVectorDimension();
@@ -616,7 +638,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             centroid[d] /= count;
         }
         // For flat centroid assignments there is a single global centroid and no secondary centroid assignments
-        return new CentroidInformation(dimension, new float[][] { centroid }, new int[count], OverspillAssignments.NONE);
+        return CentroidInformation.ofFloat(dimension, new float[][] { centroid }, new int[count], OverspillAssignments.NONE);
     }
 
     /**
@@ -654,7 +676,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             mergeOneFieldIVF(fieldInfo, mergeState, resolvedConfig);
         } else {
             // we simply write information that the field is present but we don't do anything with it.
-            writeMeta(fieldInfo, 0, 0, 0, 0, 0, null, 0, 0, 0, 0, IvfSegmentConfig.NONE);
+            writeMeta(fieldInfo, 0, 0, 0, 0, 0, null, 0, 0, 0, 0, IvfSegmentConfig.NONE, false);
         }
         // we merge the vectors at the end so we only have two copies of the vectors on disk at the same time.
         rawVectorDelegate.mergeOneField(fieldInfo, mergeState);
@@ -673,7 +695,8 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         long preconditionerLength,
         int numberOfSlices,
         int maxSliceSize,
-        IvfSegmentConfig ivfSegmentConfig
+        IvfSegmentConfig ivfSegmentConfig,
+        boolean byteCentroids
     ) throws IOException {
         ivfMeta.writeInt(field.number);
         ivfMeta.writeString(rawVectorFormatName);
@@ -702,7 +725,8 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             preconditionerLength,
             numberOfSlices,
             maxSliceSize,
-            ivfSegmentConfig
+            ivfSegmentConfig,
+            byteCentroids
         );
     }
 
@@ -717,7 +741,8 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         long preconditionerLength,
         int numberOfSlices,
         int maxSliceSize,
-        IvfSegmentConfig ivfSegmentConfig
+        IvfSegmentConfig ivfSegmentConfig,
+        boolean byteCentroids
     ) throws IOException;
 
     @SuppressForbidden(reason = "require usage of Lucene's IOUtils#deleteFilesIgnoringExceptions(...)")
@@ -738,7 +763,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             preconditioner = inheritPreconditioner(fieldInfo, mergeState, ivfSegmentConfig);
 
             final int vectorCount;
-            if (isByte) {
+            if (isByte && supportsByteNative()) {
                 ByteVectorValues mergedByteVectorValues = MergedVectorValues.mergeByteVectorValues(fieldInfo, mergeState);
                 boolean dense = mergedByteVectorValues.size() == mergeState.segmentInfo.maxDoc();
                 try (
@@ -749,12 +774,17 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                     if (docsOut != null) {
                         docsFileName = docsOut.getName();
                     }
-                    vectorCount = writeByteVectorValues(fieldInfo, docsOut, vectorsOut, mergedByteVectorValues);
+                    vectorCount = writeByteVectorValues(fieldInfo, docsOut, vectorsOut, mergedByteVectorValues, preconditioner);
                     CodecUtil.writeFooter(vectorsOut);
                     if (docsOut != null) {
                         CodecUtil.writeFooter(docsOut);
                     }
                 }
+            } else if (isByte) {
+                // Legacy codecs don't support byte IVF indexing
+                long centroidOffset = ivfCentroids.getFilePointer();
+                writeMeta(fieldInfo, 0, centroidOffset, 0, 0, 0, null, 0, 0, 0, 0, ivfSegmentConfig, false);
+                return;
             } else {
                 FloatVectorValues mergedFloatVectorValues = MergedVectorValues.mergeFloatVectorValues(fieldInfo, mergeState);
                 mergedFloatVectorValues = preconditionVectors(preconditioner, mergedFloatVectorValues, ivfSegmentConfig);
@@ -786,7 +816,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         }
         if (numVectors == 0) {
             long centroidOffset = ivfCentroids.getFilePointer();
-            writeMeta(fieldInfo, 0, centroidOffset, 0, 0, 0, null, 0, 0, 0, 0, ivfSegmentConfig);
+            writeMeta(fieldInfo, 0, centroidOffset, 0, 0, 0, null, 0, 0, 0, 0, ivfSegmentConfig, false);
             return;
         }
         // now open the temp file and build the index structures. It is expected these files to be read in sequential order.
@@ -804,7 +834,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             final KMeansFloatVectorValues floatVectorValues;
             final KMeansByteVectorValues byteVectorValues;
             final ClusteringVectorValues<?> vectorValues;
-            if (isByte) {
+            if (isByte && supportsByteNative()) {
                 floatVectorValues = null;
                 byteVectorValues = KMeansByteVectorValues.build(vectors, docs, numVectors, fieldInfo.getVectorDimension());
                 vectorValues = byteVectorValues;
@@ -826,7 +856,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 centroidTemp = mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "civf_", IOContext.DEFAULT);
                 centroidTempName = centroidTemp.getName();
                 CentroidInformation<?> centroidAssignments = calculateCentroids(fieldInfo, vectorValues, mergeState);
-                if (isByte && centroidAssignments.centroids() instanceof byte[][] byteCentroidArrays) {
+                if (supportsByteNative() && centroidAssignments.centroids() instanceof byte[][] byteCentroidArrays) {
                     // Write byte centroids to temp file
                     for (byte[] centroid : byteCentroidArrays) {
                         centroidTemp.writeBytes(centroid, centroid.length);
@@ -856,7 +886,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             try {
                 if (assignments.numCentroids() == 0) {
                     centroidOffset = ivfCentroids.getFilePointer();
-                    writeMeta(fieldInfo, 0, centroidOffset, 0, 0, 0, null, 0, 0, 0, 0, ivfSegmentConfig);
+                    writeMeta(fieldInfo, 0, centroidOffset, 0, 0, 0, null, 0, 0, 0, 0, ivfSegmentConfig, false);
                     CodecUtil.writeFooter(centroidTemp);
                     IOUtils.close(centroidTemp);
                     return;
@@ -869,7 +899,6 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                     final CentroidOffsetAndLength centroidOffsetAndLength;
 
                     if (byteCentroidsWritten && byteVectorValues != null) {
-                        byteCentroids = true;
                         // Read byte centroids from temp into on-heap byte[][] (centroids are small)
                         int dim = fieldInfo.getVectorDimension();
                         byte[][] byteCentroidArrays = new byte[assignments.numCentroids()][dim];
@@ -904,7 +933,6 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                             ivfCentroids
                         );
                         centroidLength = ivfCentroids.getFilePointer() - centroidOffset;
-                        // byteCentroids stays true until after writeMeta
                     } else {
                         centroidSupplier = createCentroidSupplier(centroidsInput, assignments, fieldInfo);
 
@@ -964,9 +992,9 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                         preconditionerLength,
                         assignments.centroidSlices() == null ? 0 : assignments.centroidSlices().sliceOffsets().length,
                         assignments.centroidSlices() == null ? 0 : assignments.centroidSlices().maxSliceSize(),
-                        ivfSegmentConfig
+                        ivfSegmentConfig,
+                        byteCentroidsWritten && byteVectorValues != null
                     );
-                    byteCentroids = false;
                 }
             } finally {
                 org.apache.lucene.util.IOUtils.deleteFilesIgnoringExceptions(mergeState.segmentInfo.dir, centroidTempName);
@@ -1017,14 +1045,23 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         FieldInfo fieldInfo,
         IndexOutput docsOut,
         IndexOutput vectorsOut,
-        ByteVectorValues byteVectorValues
+        ByteVectorValues byteVectorValues,
+        Preconditioner preconditioner
     ) throws IOException {
         int numVectors = 0;
+        int dim = fieldInfo.getVectorDimension();
+        float[] scratch = preconditioner != null ? new float[dim] : null;
+        byte[] preconditionedScratch = preconditioner != null ? new byte[dim] : null;
         final KnnVectorValues.DocIndexIterator iterator = byteVectorValues.iterator();
         for (int docV = iterator.nextDoc(); docV != NO_MORE_DOCS; docV = iterator.nextDoc()) {
             numVectors++;
             byte[] vector = byteVectorValues.vectorValue(iterator.index());
-            vectorsOut.writeBytes(vector, vector.length);
+            if (preconditioner != null) {
+                preconditioner.applyTransformToBytes(vector, preconditionedScratch, scratch);
+                vectorsOut.writeBytes(preconditionedScratch, preconditionedScratch.length);
+            } else {
+                vectorsOut.writeBytes(vector, vector.length);
+            }
             if (docsOut != null) {
                 docsOut.writeInt(iterator.docID());
             }

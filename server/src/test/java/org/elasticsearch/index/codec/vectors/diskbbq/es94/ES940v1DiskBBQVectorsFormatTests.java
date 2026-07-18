@@ -111,4 +111,29 @@ public class ES940v1DiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCa
     public void testAdvance() throws Exception {
         // TODO re-enable with hierarchical IVF, clustering as it is is flaky
     }
+
+    // Byte vector IVF indexing not supported by this legacy codec version
+
+    @Override
+    public void testRandomBytes() {}
+
+    @Override
+    public void testEmptyByteVectorData() {}
+
+    @Override
+    public void testSortedIndexBytes() {}
+
+    @Override
+    public void testByteVectorScorerIteration() {}
+
+    @Override
+    public void testMergingWithDifferentByteKnnFields() {}
+
+    @Override
+    public void testWriterByteVectorRamEstimate() {}
+
+    @Override
+    public void testMismatchedFields() {
+        // This test creates both byte and float fields; skip for legacy codecs
+    }
 }

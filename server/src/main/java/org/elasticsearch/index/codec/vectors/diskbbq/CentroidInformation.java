@@ -61,6 +61,32 @@ public record CentroidInformation<V>(V[] centroids, CentroidAssignments centroid
         );
     }
 
+    /**
+     * Creates a {@code CentroidInformation<float[]>} from float centroids.
+     */
+    public static CentroidInformation<float[]> ofFloat(int dims, float[][] centroids, int[] assignments, OverspillAssignments overspill) {
+        return new CentroidInformation<>(
+            centroids,
+            new CentroidAssignments(centroids.length, assignments, overspill, computeGlobalCentroid(dims, centroids))
+        );
+    }
+
+    /**
+     * Creates a {@code CentroidInformation<float[]>} from float centroids with centroid slices.
+     */
+    public static CentroidInformation<float[]> ofFloat(
+        int dims,
+        float[][] centroids,
+        int[] assignments,
+        OverspillAssignments overspill,
+        CentroidSlices centroidSlices
+    ) {
+        return new CentroidInformation<>(
+            centroids,
+            new CentroidAssignments(centroids.length, assignments, overspill, computeGlobalCentroid(dims, centroids), centroidSlices)
+        );
+    }
+
     public int numCentroids() {
         return centroids.length;
     }

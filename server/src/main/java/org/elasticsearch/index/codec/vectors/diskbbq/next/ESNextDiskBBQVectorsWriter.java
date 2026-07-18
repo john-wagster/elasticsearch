@@ -105,6 +105,11 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
     private final IvfFlushConfigSource flushConfigSource;
     private final IvfMergeConfigResolver mergeConfigResolver;
 
+    @Override
+    protected boolean supportsByteNative() {
+        return true;
+    }
+
     public ESNextDiskBBQVectorsWriter(
         SegmentWriteState state,
         String rawVectorFormatName,
@@ -822,7 +827,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         long preconditionerLength,
         int numberOfSlices,
         int maxSliceSize,
-        IvfSegmentConfig ivfSegmentConfig
+        IvfSegmentConfig ivfSegmentConfig,
+        boolean byteCentroids
     ) throws IOException {
         final IvfSegmentConfig segmentConfig = requireSegmentConfig(ivfSegmentConfig);
         metaOutput.writeInt(ES940OSQVectorsScorer.BULK_SIZE);
@@ -1027,7 +1033,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             }
 
             // TODO: swap out SOAR for SRAIR when HNSW graphs are used for the centroids
-            return new CentroidInformation(
+            return CentroidInformation.ofFloat(
                 fieldInfo.getVectorDimension(),
                 kMeansResult.centroids(),
                 kMeansResult.assignments(),
@@ -1040,7 +1046,6 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         }
     }
 
-    @SuppressWarnings({ "unchecked", "rawtypes" })
     private CentroidInformation<float[]> calculateCentroidsFullRebuildSliced(
         KMeansFloatVectorValues floatVectorValues,
         FieldInfo fieldInfo,
@@ -1118,7 +1123,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             logger.debug("final centroid count: {}", merged.centroids().length);
         }
         final CentroidSlices centroidSlices = new CentroidSlices(sliceOffsets, sliceLengths);
-        return new CentroidInformation(
+        return CentroidInformation.ofFloat(
             floatVectorValues.dimension(),
             merged.centroids(),
             merged.assignments(),
@@ -1169,7 +1174,6 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         }
     }
 
-    @SuppressWarnings({ "unchecked", "rawtypes" })
     @Override
     public CentroidInformation<?> calculateCentroids(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues) throws IOException {
         if (sliceField != null) {
@@ -1204,7 +1208,12 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         }
 
         // TODO: swap out SOAR for SRAIR when HNSW graphs are used for the centroids
-        return new CentroidInformation(fieldInfo.getVectorDimension(), kMeansResult.centroids(), kMeansResult.assignments(), soarOverspill);
+        return CentroidInformation.ofFloat(
+            fieldInfo.getVectorDimension(),
+            kMeansResult.centroids(),
+            kMeansResult.assignments(),
+            soarOverspill
+        );
     }
 
     static void writeQuantizedValue(IndexOutput indexOutput, byte[] binaryValue, OptimizedScalarQuantizer.QuantizationResult corrections)

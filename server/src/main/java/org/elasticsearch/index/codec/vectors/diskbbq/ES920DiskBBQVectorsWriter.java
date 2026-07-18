@@ -535,7 +535,8 @@ public class ES920DiskBBQVectorsWriter extends IVFVectorsWriter<ES920DiskBBQVect
         long preconditionerLength,
         int numberOfSlices,
         int maxSliceSize,
-        IvfSegmentConfig ivfSegmentConfig
+        IvfSegmentConfig ivfSegmentConfig,
+        boolean byteCentroids
     ) {
         // Do Nothing Extra
     }
@@ -668,12 +669,11 @@ public class ES920DiskBBQVectorsWriter extends IVFVectorsWriter<ES920DiskBBQVect
     @Override
     public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues) throws IOException {
         // Widen byte vectors to float — legacy codecs always cluster in float space
-        KMeansFloatVectorValues floatVectorValues = asFloatVectorValues(fieldInfo, vectorValues);
+        KMeansFloatVectorValues floatVectorValues = (KMeansFloatVectorValues) vectorValues;
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         return calculateCentroids(hierarchicalKMeans, floatVectorValues, fieldInfo);
     }
 
-    @SuppressWarnings({ "unchecked", "rawtypes" })
     private CentroidInformation<float[]> calculateCentroids(
         HierarchicalKMeans<float[]> hierarchicalKMeans,
         KMeansFloatVectorValues floatVectorValues,
@@ -686,7 +686,7 @@ public class ES920DiskBBQVectorsWriter extends IVFVectorsWriter<ES920DiskBBQVect
             logger.debug("final centroid count: {}", centroids.length);
         }
         int[] assignments = kMeansResult.assignments();
-        return new CentroidInformation(fieldInfo.getVectorDimension(), centroids, assignments, soarOverspill);
+        return CentroidInformation.ofFloat(fieldInfo.getVectorDimension(), centroids, assignments, soarOverspill);
     }
 
     static void writeQuantizedValue(IndexOutput indexOutput, byte[] binaryValue, OptimizedScalarQuantizer.QuantizationResult corrections)

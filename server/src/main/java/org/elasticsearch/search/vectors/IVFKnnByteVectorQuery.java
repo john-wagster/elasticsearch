@@ -46,6 +46,9 @@ public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
     final byte[] query;
     // package-private for IVFKnnByteSlicedVectorQuery access
     float[] preconditionedQuery = null;
+    // Preconditioned byte query for non-COSINE byte fields with preconditioning enabled.
+    // When set, the byte search path is used with this preconditioned query instead of the original.
+    byte[] preconditionedByteQuery = null;
 
     /**
      * Creates a new {@link IVFKnnByteVectorQuery}.
@@ -115,6 +118,7 @@ public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
      */
     protected void prepareSegmentQuery(LeafReaderContext context, boolean usePrecondition) throws IOException {
         preconditionedQuery = null;
+        preconditionedByteQuery = null;
         LeafReader reader = context.reader();
         FieldInfo fieldInfo = reader.getFieldInfos().fieldInfo(field);
         if (fieldInfo == null) {
@@ -131,18 +135,23 @@ public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
                     if (knnVectorsReader instanceof VectorPreconditioner) {
                         Preconditioner preconditioner = ((VectorPreconditioner) knnVectorsReader).getPreconditioner(fieldInfo);
                         if (preconditioner != null) {
-                            float[] out = new float[query.length];
                             if (fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE) {
+                                // COSINE: widen, normalize, precondition → float search path
+                                float[] out = new float[query.length];
                                 float[] floatQuery = new float[query.length];
                                 for (int i = 0; i < query.length; i++) {
                                     floatQuery[i] = query[i];
                                 }
                                 VectorUtil.l2normalize(floatQuery);
                                 preconditioner.applyTransform(floatQuery, out);
+                                preconditionedQuery = out;
                             } else {
-                                preconditioner.applyTransform(query, out);
+                                // Non-COSINE: precondition byte → byte, stay in byte search path
+                                byte[] out = new byte[query.length];
+                                float[] scratch = new float[query.length];
+                                preconditioner.applyTransformToBytes(query, out, scratch);
+                                preconditionedByteQuery = out;
                             }
-                            preconditionedQuery = out;
                             return;
                         }
                     }
@@ -223,7 +232,8 @@ public class IVFKnnByteVectorQuery extends AbstractIVFKnnVectorQuery {
         if (preconditionedQuery != null) {
             reader.searchNearestVectors(field, preconditionedQuery, knnCollector, acceptDocs);
         } else {
-            reader.searchNearestVectors(field, query, knnCollector, acceptDocs);
+            byte[] searchQuery = preconditionedByteQuery != null ? preconditionedByteQuery : query;
+            reader.searchNearestVectors(field, searchQuery, knnCollector, acceptDocs);
         }
         TopDocs results = knnCollector instanceof BulkKnnCollector bulkKnnCollector
             ? bulkKnnCollector.unsortedTopK()

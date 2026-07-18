@@ -666,7 +666,8 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
         long preconditionerLength,
         int numberOfSlices,
         int maxSliceSize,
-        IvfSegmentConfig ivfSegmentConfig
+        IvfSegmentConfig ivfSegmentConfig,
+        boolean byteCentroids
     ) throws IOException {
         final IvfSegmentConfig segmentConfig = requireSegmentConfig(ivfSegmentConfig);
         metaOutput.writeInt(ES940OSQVectorsScorer.BULK_SIZE);
@@ -717,7 +718,7 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
         MergeState mergeState
     ) throws IOException {
         // Widen byte vectors to float — legacy codecs always cluster in float space
-        KMeansFloatVectorValues floatVectorValues = asFloatVectorValues(fieldInfo, vectorValues);
+        KMeansFloatVectorValues floatVectorValues = (KMeansFloatVectorValues) vectorValues;
         // Gather prior segment statistics for tiered merge strategy selection
         int numSegments = mergeState.knnVectorsReaders.length;
         int[] segmentSizes = new int[numSegments];
@@ -793,7 +794,7 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
                 printClusterQualityStatistics(clusterSizes);
             }
 
-            return new CentroidInformation(
+            return CentroidInformation.ofFloat(
                 fieldInfo.getVectorDimension(),
                 kMeansResult.centroids(),
                 kMeansResult.assignments(),
@@ -806,11 +807,10 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
         }
     }
 
-    @SuppressWarnings({ "unchecked", "rawtypes" })
     @Override
     public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues) throws IOException {
         // Widen byte vectors to float — legacy codecs always cluster in float space
-        KMeansFloatVectorValues floatVectorValues = asFloatVectorValues(fieldInfo, vectorValues);
+        KMeansFloatVectorValues floatVectorValues = (KMeansFloatVectorValues) vectorValues;
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         KMeansNeighbors<float[]> kMeansResult = hierarchicalKMeans.cluster(floatVectorValues, vectorPerCluster);
         OverspillAssignments soarOverspill = hierarchicalKMeans.computeSoar(
@@ -822,7 +822,12 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
             logger.debug("final centroid count: {}", kMeansResult.centroids().length);
         }
 
-        return new CentroidInformation(fieldInfo.getVectorDimension(), kMeansResult.centroids(), kMeansResult.assignments(), soarOverspill);
+        return CentroidInformation.ofFloat(
+            fieldInfo.getVectorDimension(),
+            kMeansResult.centroids(),
+            kMeansResult.assignments(),
+            soarOverspill
+        );
     }
 
     static void writeQuantizedValue(IndexOutput indexOutput, byte[] binaryValue, OptimizedScalarQuantizer.QuantizationResult corrections)

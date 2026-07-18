@@ -57,6 +57,22 @@ public class Preconditioner {
      * @param vector the byte vector to transform
      * @param out the output float array for the transformed vector
      */
+    /**
+     * Applies the preconditioner rotation to a byte vector, producing a rotated byte vector.
+     * The rotation is performed in float precision internally (using the provided scratch buffer),
+     * then the result is rounded and clamped back to byte range [-128, 127].
+     *
+     * @param vector the input byte vector
+     * @param out    the output byte vector (same length as input)
+     * @param scratch a float scratch buffer (same length as input), reused across calls
+     */
+    public void applyTransformToBytes(byte[] vector, byte[] out, float[] scratch) {
+        applyTransform(vector, scratch);
+        for (int i = 0; i < scratch.length; i++) {
+            out[i] = (byte) Math.clamp(Math.round(scratch[i]), -128, 127);
+        }
+    }
+
     public void applyTransform(byte[] vector, float[] out) {
         assert vector != null;
         assert vector.length == blockDim * (blocks.length - 1) + (blocks[blocks.length - 1].length);
