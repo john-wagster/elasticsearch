@@ -143,6 +143,10 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         float visitRatio
     ) throws IOException {
         // Extract float target for FlatCentroidIndex (byte queries are converted at the IVF search entry point)
+        // TODO: For byte queries, this widens to float because FlatCentroidIndex quantizes the query against the
+        // global centroid (float) via scalarQuantize(float[], ..., float[]). A mixed scalarQuantize(byte[], ..., float[])
+        // overload in OptimizedScalarQuantizer + ESVectorUtil SIMD layer would eliminate this widening.
+        // Low priority — only widens a single query vector, not a hot path.
         float[] targetQuery = switch (queryTarget) {
             case QueryTarget.FloatQuery fq -> fq.vector();
             case QueryTarget.ByteQuery bq -> {
