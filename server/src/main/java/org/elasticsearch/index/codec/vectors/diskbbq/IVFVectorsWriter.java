@@ -329,6 +329,14 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         );
     }
 
+    /**
+     * Inherits a preconditioner from one of the merging segments, or creates a new one if none
+     * is available. Returns {@code null} if preconditioning is not enabled for this format.
+     *
+     * <p>During merge, this attempts to reuse an existing preconditioner from a prior segment
+     * (via {@link VectorPreconditioner}) so the rotation matrix is consistent across segments.
+     * If no prior segment provides one, falls back to {@link #createPreconditioner}.
+     */
     protected abstract Preconditioner inheritPreconditioner(FieldInfo fieldInfo, MergeState mergeState, IvfSegmentConfig ivfSegmentConfig)
         throws IOException;
 
@@ -756,9 +764,10 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         String tempRawVectorsFileName = null;
         String docsFileName = null;
         Preconditioner preconditioner;
-        // build a float vector values with random access. In order to do that we dump the vectors to
-        // a temporary file and if the segment is not dense, the docs to another file.
-        // For byte vectors, we widen to float during the temp file write.
+        // Build vector values with random access by dumping vectors to a temporary file.
+        // If the segment is not dense, doc IDs are written to a separate file.
+        // For byte fields with supportsByteNative(), vectors are written as bytes;
+        // otherwise byte IVF indexing is skipped entirely.
         try (
             IndexOutput vectorsOut = mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "ivfvec_", IOContext.DEFAULT)
         ) {
@@ -943,7 +952,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                         centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
                         CI centroidIndex = writeCentroidIndex(centroidSupplier, assignments.assignments(), ivfCentroids);
 
-                // For byte fields with float centroids (e.g. flat threshold), widen byte vectors to float
+                        // For byte fields with float centroids (e.g. flat threshold), widen byte vectors to float
                         final FloatVectorValues postingsVectorValues;
                         if (floatVectorValues != null) {
                             postingsVectorValues = floatVectorValues;
