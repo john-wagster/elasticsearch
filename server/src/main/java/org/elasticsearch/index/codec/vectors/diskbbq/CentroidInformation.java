@@ -22,34 +22,6 @@ package org.elasticsearch.index.codec.vectors.diskbbq;
  */
 public record CentroidInformation<V>(V[] centroids, CentroidAssignments centroidAssignments) {
 
-    @SuppressWarnings("unchecked")
-    public CentroidInformation(int dims, float[][] centroids, int[] assignments, OverspillAssignments overspillAssignments) {
-        this(
-            (V[]) centroids,
-            new CentroidAssignments(centroids.length, assignments, overspillAssignments, computeGlobalCentroid(dims, centroids))
-        );
-    }
-
-    @SuppressWarnings("unchecked")
-    public CentroidInformation(
-        int dims,
-        float[][] centroids,
-        int[] assignments,
-        OverspillAssignments overspillAssignments,
-        CentroidSlices centroidSlices
-    ) {
-        this(
-            (V[]) centroids,
-            new CentroidAssignments(
-                centroids.length,
-                assignments,
-                overspillAssignments,
-                computeGlobalCentroid(dims, centroids),
-                centroidSlices
-            )
-        );
-    }
-
     /**
      * Creates a {@code CentroidInformation<byte[]>} from byte centroids.
      * The global centroid is computed as the float mean of the byte centroids.
