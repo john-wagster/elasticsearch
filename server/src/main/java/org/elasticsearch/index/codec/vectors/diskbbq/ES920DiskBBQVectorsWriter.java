@@ -39,8 +39,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
-import java.util.List;
-import java.util.function.Consumer;
 import java.util.function.IntPredicate;
 import java.util.function.IntUnaryOperator;
 
@@ -467,22 +465,6 @@ public class ES920DiskBBQVectorsWriter extends IVFVectorsWriter<ES920DiskBBQVect
     protected Preconditioner createPreconditioner(int dimension, IvfSegmentConfig ivfSegmentConfig) {
         // no-op
         return null;
-    }
-
-    @Override
-    protected FloatVectorValues preconditionVectors(
-        Preconditioner Preconditioner,
-        FloatVectorValues vectors,
-        IvfSegmentConfig ivfSegmentConfig
-    ) {
-        // no-op
-        return vectors;
-    }
-
-    @Override
-    protected Consumer<List<float[]>> preconditionVectors(Preconditioner preconditioner, IvfSegmentConfig ivfSegmentConfig) {
-        // no-op
-        return (vectors) -> {};
     }
 
     @Override

@@ -9,6 +9,7 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq;
 
+import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.elasticsearch.simdvec.ESVectorUtil;
@@ -217,6 +218,82 @@ public class Preconditioner {
         }
 
         return permutationMatrix;
+    }
+
+    /**
+     * Applies the preconditioner rotation to each float vector in the list, in-place.
+     * Uses a single scratch buffer — no per-vector allocations.
+     */
+    public void applyTransformInPlace(List<float[]> vectors) {
+        if (vectors.isEmpty()) return;
+        float[] scratch = new float[vectors.getFirst().length];
+        for (float[] vector : vectors) {
+            applyTransform(vector, scratch);
+            System.arraycopy(scratch, 0, vector, 0, vector.length);
+        }
+    }
+
+    /**
+     * Applies the preconditioner rotation to each byte vector in the list, in-place.
+     * The rotation is performed in float precision internally, then rounded and clamped
+     * back to byte range [-128, 127]. Uses two scratch buffers — no per-vector allocations.
+     */
+    public void applyTransformToBytesInPlace(List<byte[]> vectors) {
+        if (vectors.isEmpty()) return;
+        int dim = vectors.getFirst().length;
+        float[] floatScratch = new float[dim];
+        byte[] byteScratch = new byte[dim];
+        for (byte[] vector : vectors) {
+            applyTransformToBytes(vector, byteScratch, floatScratch);
+            System.arraycopy(byteScratch, 0, vector, 0, dim);
+        }
+    }
+
+    /**
+     * Returns a {@link FloatVectorValues} view that lazily applies the preconditioner rotation
+     * to each vector on access. Used during merge where vectors are streamed from disk.
+     */
+    public FloatVectorValues preconditionValues(FloatVectorValues vectors) {
+        final float[] preconditionedVectorValue = new float[vectors.dimension()];
+        return new FloatVectorValues() {
+            int cachedOrd = -1;
+
+            @Override
+            public int getVectorByteLength() {
+                return vectors.getVectorByteLength();
+            }
+
+            @Override
+            public float[] vectorValue(int ord) throws IOException {
+                assert ord != -1;
+                if (ord != cachedOrd) {
+                    float[] vectorValue = vectors.vectorValue(ord);
+                    applyTransform(vectorValue, preconditionedVectorValue);
+                    cachedOrd = ord;
+                }
+                return preconditionedVectorValue;
+            }
+
+            @Override
+            public FloatVectorValues copy() throws IOException {
+                return vectors.copy();
+            }
+
+            @Override
+            public int dimension() {
+                return vectors.dimension();
+            }
+
+            @Override
+            public int size() {
+                return vectors.size();
+            }
+
+            @Override
+            public DocIndexIterator iterator() {
+                return vectors.iterator();
+            }
+        };
     }
 
     public void write(IndexOutput out) throws IOException {

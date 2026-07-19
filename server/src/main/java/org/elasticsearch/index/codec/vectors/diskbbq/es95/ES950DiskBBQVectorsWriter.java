@@ -70,7 +70,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
-import java.util.function.Consumer;
 
 import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
 
@@ -183,79 +182,6 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
         if (preconditioner != null) {
             preconditioner.write(out);
         }
-    }
-
-    @Override
-    protected Consumer<List<float[]>> preconditionVectors(Preconditioner preconditioner, IvfSegmentConfig fieldWritingContext) {
-        return (vectors) -> {
-            if (requireSegmentConfig(fieldWritingContext).usePrecondition() == false || vectors.isEmpty()) {
-                return;
-            }
-            if (preconditioner == null) {
-                throw new IllegalStateException("preconditioner was not created but should be first");
-            }
-            float[] out = new float[vectors.getFirst().length];
-            for (float[] vector : vectors) {
-                preconditioner.applyTransform(vector, out);
-                System.arraycopy(out, 0, vector, 0, vector.length);
-            }
-        };
-    }
-
-    @Override
-    protected FloatVectorValues preconditionVectors(
-        Preconditioner preconditioner,
-        FloatVectorValues vectors,
-        IvfSegmentConfig fieldWritingContext
-    ) {
-        if (requireSegmentConfig(fieldWritingContext).usePrecondition() == false) {
-            return vectors;
-        }
-        if (preconditioner == null) {
-            throw new IllegalStateException("preconditioner was not created but should be first");
-        }
-
-        // TODO: batch apply preconditioner for better performance and keep a batch on heap at a time
-        return new FloatVectorValues() {
-            final float[] preconditionedVectorValue = new float[vectors.dimension()];
-            int cachedOrd = -1;
-
-            @Override
-            public int getVectorByteLength() {
-                return vectors.getVectorByteLength();
-            }
-
-            @Override
-            public float[] vectorValue(int ord) throws IOException {
-                assert ord != -1;
-                if (ord != cachedOrd) {
-                    float[] vectorValue = vectors.vectorValue(ord);
-                    preconditioner.applyTransform(vectorValue, this.preconditionedVectorValue);
-                    cachedOrd = ord;
-                }
-                return this.preconditionedVectorValue;
-            }
-
-            @Override
-            public FloatVectorValues copy() throws IOException {
-                return vectors.copy();
-            }
-
-            @Override
-            public int dimension() {
-                return vectors.dimension();
-            }
-
-            @Override
-            public int size() {
-                return vectors.size();
-            }
-
-            @Override
-            public DocIndexIterator iterator() {
-                return vectors.iterator();
-            }
-        };
     }
 
     @Override

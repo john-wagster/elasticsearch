@@ -47,7 +47,6 @@ import java.nio.ByteOrder;
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Consumer;
 
 import static org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader.SIMILARITY_FUNCTIONS;
 import static org.apache.lucene.search.DocIdSetIterator.NO_MORE_DOCS;
@@ -344,14 +343,6 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
 
     protected abstract void writePreconditioner(Preconditioner precondtioner, IndexOutput out) throws IOException;
 
-    protected abstract FloatVectorValues preconditionVectors(
-        Preconditioner precondtioner,
-        FloatVectorValues vectors,
-        IvfSegmentConfig ivfSegmentConfig
-    );
-
-    protected abstract Consumer<List<float[]>> preconditionVectors(Preconditioner preconditioner, IvfSegmentConfig ivfSegmentConfig);
-
     /**
      * Called for each field at the start of {@link #flush} before IVF work.
      * {@link org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsWriter} returns a resolved {@link IvfSegmentConfig};
@@ -392,7 +383,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 final FlatFieldVectorsWriter<byte[]> byteWriter = (FlatFieldVectorsWriter<byte[]>) fieldWriter.delegate;
                 // Precondition byte vectors in-place before building KMeansByteVectorValues (matches float pattern)
                 if (preconditioner != null) {
-                    preconditionByteVectorsInPlace(byteWriter.getVectors(), preconditioner);
+                    preconditioner.applyTransformToBytesInPlace(byteWriter.getVectors());
                 }
                 clusteringVectorValues = getKMeansByteVectorValues(fieldWriter.fieldInfo, byteWriter, maxDoc, sortMap);
             } else if (isByte) {
@@ -402,13 +393,10 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             } else {
                 @SuppressWarnings("unchecked")
                 final FlatFieldVectorsWriter<float[]> floatWriter = (FlatFieldVectorsWriter<float[]>) fieldWriter.delegate;
-                clusteringVectorValues = getKMeansFloatVectorValues(
-                    fieldWriter.fieldInfo,
-                    floatWriter,
-                    maxDoc,
-                    preconditionVectors(preconditioner, ivfSegmentConfig),
-                    sortMap
-                );
+                if (preconditioner != null) {
+                    preconditioner.applyTransformInPlace(floatWriter.getVectors());
+                }
+                clusteringVectorValues = getKMeansFloatVectorValues(fieldWriter.fieldInfo, floatWriter, maxDoc, sortMap);
             }
 
             // build centroids
@@ -511,11 +499,9 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         FieldInfo fieldInfo,
         FlatFieldVectorsWriter<float[]> fieldVectorsWriter,
         int maxDoc,
-        Consumer<List<float[]>> vectorTransform,
         Sorter.DocMap sortMap
     ) throws IOException {
         List<float[]> vectors = fieldVectorsWriter.getVectors();
-        vectorTransform.accept(vectors);
         if (vectors.size() == maxDoc && sortMap == null) {
             return KMeansFloatVectorValues.build(vectors, null, fieldInfo.getVectorDimension());
         } else if (sortMap == null) {
@@ -591,22 +577,6 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 }
             };
             return KMeansByteVectorValues.build(orderedVectors, docIds, fieldInfo.getVectorDimension());
-        }
-    }
-
-    /**
-     * Preconditions byte vectors in-place by applying the rotation matrix and clamping back to byte.
-     * Uses two scratch buffers (one float, one byte) — no per-vector allocations.
-     * Matches the float path pattern where vectors are modified in-place via {@code System.arraycopy}.
-     */
-    private static void preconditionByteVectorsInPlace(List<byte[]> vectors, Preconditioner preconditioner) {
-        if (vectors.isEmpty()) return;
-        int dim = vectors.getFirst().length;
-        float[] floatScratch = new float[dim];
-        byte[] byteScratch = new byte[dim];
-        for (byte[] vector : vectors) {
-            preconditioner.applyTransformToBytes(vector, byteScratch, floatScratch);
-            System.arraycopy(byteScratch, 0, vector, 0, dim);
         }
     }
 
@@ -800,7 +770,9 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 return;
             } else {
                 FloatVectorValues mergedFloatVectorValues = MergedVectorValues.mergeFloatVectorValues(fieldInfo, mergeState);
-                mergedFloatVectorValues = preconditionVectors(preconditioner, mergedFloatVectorValues, ivfSegmentConfig);
+                if (preconditioner != null) {
+                    mergedFloatVectorValues = preconditioner.preconditionValues(mergedFloatVectorValues);
+                }
                 boolean dense = mergedFloatVectorValues.size() == mergeState.segmentInfo.maxDoc();
                 try (
                     IndexOutput docsOut = dense
