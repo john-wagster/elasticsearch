@@ -642,9 +642,12 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
     }
 
     /**
-     * Widens byte vector values to float. Legacy codec versions that always cluster in float space
-     * use this to convert {@link ClusteringByteVectorValues} into {@link KMeansFloatVectorValues}.
-     * If the input is already a {@link KMeansFloatVectorValues}, it is returned unchanged.
+     * Widens byte vector values to float. Used when a byte field produces float centroids
+     * (e.g., the flat threshold path with too few vectors for clustering) and the float
+     * postings path needs {@link FloatVectorValues}. Also used as a fallback in the ESNext
+     * merge path when float clustering is selected for byte fields.
+     * <p>
+     * Not used by legacy codecs — they skip byte IVF indexing entirely.
      */
     protected static KMeansFloatVectorValues asFloatVectorValues(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues)
         throws IOException {
@@ -940,7 +943,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                         centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
                         CI centroidIndex = writeCentroidIndex(centroidSupplier, assignments.assignments(), ivfCentroids);
 
-                        // For byte fields with float centroids (legacy codecs), widen byte vectors to float
+                // For byte fields with float centroids (e.g. flat threshold), widen byte vectors to float
                         final FloatVectorValues postingsVectorValues;
                         if (floatVectorValues != null) {
                             postingsVectorValues = floatVectorValues;
