@@ -390,11 +390,11 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             if (isByte && supportsByteNative()) {
                 @SuppressWarnings("unchecked")
                 final FlatFieldVectorsWriter<byte[]> byteWriter = (FlatFieldVectorsWriter<byte[]>) fieldWriter.delegate;
-                KMeansByteVectorValues byteVals = getKMeansByteVectorValues(fieldWriter.fieldInfo, byteWriter, maxDoc, sortMap);
+                // Precondition byte vectors in-place before building KMeansByteVectorValues (matches float pattern)
                 if (preconditioner != null) {
-                    byteVals = preconditionByteVectors(byteVals, preconditioner);
+                    preconditionByteVectorsInPlace(byteWriter.getVectors(), preconditioner);
                 }
-                clusteringVectorValues = byteVals;
+                clusteringVectorValues = getKMeansByteVectorValues(fieldWriter.fieldInfo, byteWriter, maxDoc, sortMap);
             } else if (isByte) {
                 // Legacy codecs don't support byte IVF indexing — skip and write empty meta
                 writeMeta(fieldWriter.fieldInfo, 0, 0, 0, 0, 0, null, 0, 0, 0, 0, ivfSegmentConfig, false);
@@ -430,6 +430,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             if (supportsByteNative() && centroidAssignments.centroids() instanceof byte[][] byteCentroidArrays) {
                 centroidSupplier = createCentroidSupplier(fieldWriter.fieldInfo, byteCentroidArrays, globalCentroid);
                 centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
+                // write initial centroid index (we might need to read it later for overspilling)
                 centroidIndex = writeCentroidIndex(centroidSupplier, centroidAssignments.assignments(), ivfCentroids);
                 postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
 
@@ -449,9 +450,10 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 CentroidInformation<float[]> floatCentroidInfo = (CentroidInformation<float[]>) centroidAssignments;
                 centroidSupplier = createCentroidSupplier(fieldWriter.fieldInfo, floatCentroidInfo.centroids(), globalCentroid);
                 centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
+                // write initial centroid index (we might need to read it later for overspilling)
                 centroidIndex = writeCentroidIndex(centroidSupplier, centroidAssignments.assignments(), ivfCentroids);
                 postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
-                // For byte fields with float centroids (legacy codecs), widen byte vectors to float
+                // For byte fields with float centroids (e.g. flat threshold), widen byte vectors to float
                 final FloatVectorValues postingsVectorValues;
                 if (clusteringVectorValues instanceof FloatVectorValues fvv) {
                     postingsVectorValues = fvv;
@@ -592,21 +594,20 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         }
     }
 
-    private static KMeansByteVectorValues preconditionByteVectors(KMeansByteVectorValues byteVals, Preconditioner preconditioner)
-        throws IOException {
-        int size = byteVals.size();
-        int dim = byteVals.dimension();
-        float[] scratch = new float[dim];
-        List<byte[]> preconditioned = new ArrayList<>(size);
-        int[] docs = new int[size];
-        for (int i = 0; i < size; i++) {
-            byte[] vector = byteVals.vectorValue(i);
-            byte[] out = new byte[dim];
-            preconditioner.applyTransformToBytes(vector, out, scratch);
-            preconditioned.add(out);
-            docs[i] = byteVals.ordToDoc(i);
+    /**
+     * Preconditions byte vectors in-place by applying the rotation matrix and clamping back to byte.
+     * Uses two scratch buffers (one float, one byte) — no per-vector allocations.
+     * Matches the float path pattern where vectors are modified in-place via {@code System.arraycopy}.
+     */
+    private static void preconditionByteVectorsInPlace(List<byte[]> vectors, Preconditioner preconditioner) {
+        if (vectors.isEmpty()) return;
+        int dim = vectors.getFirst().length;
+        float[] floatScratch = new float[dim];
+        byte[] byteScratch = new byte[dim];
+        for (byte[] vector : vectors) {
+            preconditioner.applyTransformToBytes(vector, byteScratch, floatScratch);
+            System.arraycopy(byteScratch, 0, vector, 0, dim);
         }
-        return KMeansByteVectorValues.build(preconditioned, docs, dim);
     }
 
     /**
