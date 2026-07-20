@@ -383,7 +383,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 final FlatFieldVectorsWriter<byte[]> byteWriter = (FlatFieldVectorsWriter<byte[]>) fieldWriter.delegate;
                 // Precondition byte vectors in-place before building KMeansByteVectorValues (matches float pattern)
                 if (preconditioner != null) {
-                    preconditioner.applyTransformToBytesInPlace(byteWriter.getVectors());
+                    preconditioner.preconditionVectorsInPlace(byteWriter.getVectors(), VectorEncoding.BYTE);
                 }
                 clusteringVectorValues = getKMeansByteVectorValues(fieldWriter.fieldInfo, byteWriter, maxDoc, sortMap);
             } else if (isByte) {
@@ -394,7 +394,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 @SuppressWarnings("unchecked")
                 final FlatFieldVectorsWriter<float[]> floatWriter = (FlatFieldVectorsWriter<float[]>) fieldWriter.delegate;
                 if (preconditioner != null) {
-                    preconditioner.applyTransformInPlace(floatWriter.getVectors());
+                    preconditioner.preconditionVectorsInPlace(floatWriter.getVectors(), VectorEncoding.FLOAT32);
                 }
                 clusteringVectorValues = getKMeansFloatVectorValues(fieldWriter.fieldInfo, floatWriter, maxDoc, sortMap);
             }

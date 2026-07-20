@@ -10,6 +10,7 @@
 package org.elasticsearch.index.codec.vectors.diskbbq;
 
 import org.apache.lucene.index.FloatVectorValues;
+import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.elasticsearch.simdvec.ESVectorUtil;
@@ -221,31 +222,36 @@ public class Preconditioner {
     }
 
     /**
-     * Applies the preconditioner rotation to each float vector in the list, in-place.
-     * Uses a single scratch buffer — no per-vector allocations.
+     * Applies the preconditioner rotation to each vector in the list, in-place.
+     * The {@code encoding} determines whether vectors are {@code float[]} or {@code byte[]}.
+     * For byte vectors, the rotation is performed in float precision internally, then rounded
+     * and clamped back to byte range [-128, 127].
+     *
+     * @param vectors  the list of vectors to precondition in-place
+     * @param encoding the vector encoding (FLOAT32 or BYTE)
      */
-    public void applyTransformInPlace(List<float[]> vectors) {
+    @SuppressWarnings("unchecked")
+    public void preconditionVectorsInPlace(List<?> vectors, VectorEncoding encoding) {
         if (vectors.isEmpty()) return;
-        float[] scratch = new float[vectors.getFirst().length];
-        for (float[] vector : vectors) {
-            applyTransform(vector, scratch);
-            System.arraycopy(scratch, 0, vector, 0, vector.length);
-        }
-    }
-
-    /**
-     * Applies the preconditioner rotation to each byte vector in the list, in-place.
-     * The rotation is performed in float precision internally, then rounded and clamped
-     * back to byte range [-128, 127]. Uses two scratch buffers — no per-vector allocations.
-     */
-    public void applyTransformToBytesInPlace(List<byte[]> vectors) {
-        if (vectors.isEmpty()) return;
-        int dim = vectors.getFirst().length;
-        float[] floatScratch = new float[dim];
-        byte[] byteScratch = new byte[dim];
-        for (byte[] vector : vectors) {
-            applyTransformToBytes(vector, byteScratch, floatScratch);
-            System.arraycopy(byteScratch, 0, vector, 0, dim);
+        switch (encoding) {
+            case FLOAT32 -> {
+                List<float[]> floatVecs = (List<float[]>) vectors;
+                float[] scratch = new float[floatVecs.getFirst().length];
+                for (float[] vector : floatVecs) {
+                    applyTransform(vector, scratch);
+                    System.arraycopy(scratch, 0, vector, 0, vector.length);
+                }
+            }
+            case BYTE -> {
+                List<byte[]> byteVecs = (List<byte[]>) vectors;
+                int dim = byteVecs.getFirst().length;
+                float[] floatScratch = new float[dim];
+                byte[] byteScratch = new byte[dim];
+                for (byte[] vector : byteVecs) {
+                    applyTransformToBytes(vector, byteScratch, floatScratch);
+                    System.arraycopy(byteScratch, 0, vector, 0, dim);
+                }
+            }
         }
     }
 
