@@ -115,7 +115,8 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             throw new IllegalArgumentException("IVF does not support cosine similarity");
         }
         final FlatFieldVectorsWriter<?> rawVectorDelegate = this.rawVectorDelegate.addField(fieldInfo);
-        if (fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32) || fieldInfo.getVectorEncoding().equals(VectorEncoding.BYTE)) {
+        if (fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32)
+            || (fieldInfo.getVectorEncoding().equals(VectorEncoding.BYTE) && supportsByteNative())) {
             fieldWriters.add(new FieldWriter(fieldInfo, rawVectorDelegate));
         } else {
             // we simply write information that the field is present but we don't do anything with it.
@@ -378,7 +379,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             // build a float vector values with random access
             final boolean isByte = fieldWriter.fieldInfo.getVectorEncoding() == VectorEncoding.BYTE;
             final ClusteringVectorValues<?> clusteringVectorValues;
-            if (isByte && supportsByteNative()) {
+            if (isByte) {
                 @SuppressWarnings("unchecked")
                 final FlatFieldVectorsWriter<byte[]> byteWriter = (FlatFieldVectorsWriter<byte[]>) fieldWriter.delegate;
                 // Precondition byte vectors in-place before building KMeansByteVectorValues (matches float pattern)
@@ -386,10 +387,6 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                     preconditioner.preconditionVectorsInPlace(byteWriter.getVectors(), VectorEncoding.BYTE);
                 }
                 clusteringVectorValues = getKMeansByteVectorValues(fieldWriter.fieldInfo, byteWriter, maxDoc, sortMap);
-            } else if (isByte) {
-                // Legacy codecs don't support byte IVF indexing — skip and write empty meta
-                writeMeta(fieldWriter.fieldInfo, 0, 0, 0, 0, 0, null, 0, 0, 0, 0, ivfSegmentConfig, false);
-                continue;
             } else {
                 @SuppressWarnings("unchecked")
                 final FlatFieldVectorsWriter<float[]> floatWriter = (FlatFieldVectorsWriter<float[]>) fieldWriter.delegate;
@@ -654,7 +651,8 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
     @Override
     public final IORunnable mergeOneField(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
         IvfSegmentConfig resolvedConfig = resolveMergeConfig(fieldInfo, mergeState);
-        if (fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32) || fieldInfo.getVectorEncoding().equals(VectorEncoding.BYTE)) {
+        if (fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32)
+            || (fieldInfo.getVectorEncoding().equals(VectorEncoding.BYTE) && supportsByteNative())) {
             mergeOneFieldIVF(fieldInfo, mergeState, resolvedConfig);
         } else {
             // we simply write information that the field is present but we don't do anything with it.
@@ -746,7 +744,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             preconditioner = inheritPreconditioner(fieldInfo, mergeState, ivfSegmentConfig);
 
             final int vectorCount;
-            if (isByte && supportsByteNative()) {
+            if (isByte) {
                 ByteVectorValues mergedByteVectorValues = MergedVectorValues.mergeByteVectorValues(fieldInfo, mergeState);
                 boolean dense = mergedByteVectorValues.size() == mergeState.segmentInfo.maxDoc();
                 try (
@@ -763,11 +761,6 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                         CodecUtil.writeFooter(docsOut);
                     }
                 }
-            } else if (isByte) {
-                // Legacy codecs don't support byte IVF indexing
-                long centroidOffset = ivfCentroids.getFilePointer();
-                writeMeta(fieldInfo, 0, centroidOffset, 0, 0, 0, null, 0, 0, 0, 0, ivfSegmentConfig, false);
-                return;
             } else {
                 FloatVectorValues mergedFloatVectorValues = MergedVectorValues.mergeFloatVectorValues(fieldInfo, mergeState);
                 if (preconditioner != null) {
@@ -819,7 +812,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             final KMeansFloatVectorValues floatVectorValues;
             final KMeansByteVectorValues byteVectorValues;
             final ClusteringVectorValues<?> vectorValues;
-            if (isByte && supportsByteNative()) {
+            if (isByte) {
                 floatVectorValues = null;
                 byteVectorValues = KMeansByteVectorValues.build(vectors, docs, numVectors, fieldInfo.getVectorDimension());
                 vectorValues = byteVectorValues;
