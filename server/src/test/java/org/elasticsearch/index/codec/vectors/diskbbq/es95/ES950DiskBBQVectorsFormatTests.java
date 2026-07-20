@@ -514,29 +514,4 @@ public class ES950DiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCase
         writer.addDocument(doc);
     }
 
-    // Byte vector IVF indexing not supported by this legacy codec version
-
-    @Override
-    public void testRandomBytes() {}
-
-    @Override
-    public void testEmptyByteVectorData() {}
-
-    @Override
-    public void testSortedIndexBytes() {}
-
-    @Override
-    public void testByteVectorScorerIteration() {}
-
-    @Override
-    public void testMergingWithDifferentByteKnnFields() {}
-
-    @Override
-    public void testWriterByteVectorRamEstimate() {}
-
-    @Override
-    public void testMismatchedFields() {
-        // This test creates both byte and float fields; skip for legacy codecs
-    }
-
 }

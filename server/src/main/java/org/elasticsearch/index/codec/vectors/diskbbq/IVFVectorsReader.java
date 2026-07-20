@@ -370,7 +370,16 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
                 doSearch(field, new QueryTarget.FloatQuery(floatTarget), knnCollector, acceptDocs);
             }
         } else {
-            getReaderForField(field).search(field, target, knnCollector, acceptDocs);
+            // No IVF structure for this field — brute-force search over raw byte vectors
+            final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
+            final ByteVectorValues values = getReaderForField(field).getByteVectorValues(field);
+            for (int i = 0; i < values.size(); i++) {
+                final float score = fieldInfo.getVectorSimilarityFunction().compare(target, values.vectorValue(i));
+                knnCollector.collect(values.ordToDoc(i), score);
+                if (knnCollector.earlyTerminated()) {
+                    return;
+                }
+            }
         }
     }
 
