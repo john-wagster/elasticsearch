@@ -97,6 +97,7 @@ public class Preconditioner {
         for (int j = 0; j < blocks.length; j++) {
             float[][] block = blocks[j];
             int blockDim = blocks[j].length;
+            // blockDim is only ever smaller for the tail
             if (blockDim != this.blockDim) {
                 x = new float[blockDim];
                 blockOut = new float[blockDim];

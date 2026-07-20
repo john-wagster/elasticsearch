@@ -643,7 +643,7 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
         ClusteringVectorValues<?> vectorValues,
         MergeState mergeState
     ) throws IOException {
-        // Widen byte vectors to float — legacy codecs always cluster in float space
+        // Byte fields are gated by supportsByteNative() in addField/mergeOneField and never reach here
         KMeansFloatVectorValues floatVectorValues = (KMeansFloatVectorValues) vectorValues;
         // Gather prior segment statistics for tiered merge strategy selection
         int numSegments = mergeState.knnVectorsReaders.length;
@@ -735,7 +735,7 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
 
     @Override
     public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues) throws IOException {
-        // Widen byte vectors to float — legacy codecs always cluster in float space
+        // Byte fields are gated by supportsByteNative() in addField/mergeOneField and never reach here
         KMeansFloatVectorValues floatVectorValues = (KMeansFloatVectorValues) vectorValues;
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         KMeansNeighbors<float[]> kMeansResult = hierarchicalKMeans.cluster(floatVectorValues, vectorPerCluster);

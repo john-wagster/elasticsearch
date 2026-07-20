@@ -729,7 +729,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
         ClusteringVectorValues<?> vectorValues,
         MergeState mergeState
     ) throws IOException {
-        // Widen byte vectors to float — legacy codecs always cluster in float space
+        // Byte fields are gated by supportsByteNative() in addField/mergeOneField and never reach here
         KMeansFloatVectorValues floatVectorValues = (KMeansFloatVectorValues) vectorValues;
         // TODO: consider hinting / bootstrapping hierarchical kmeans with the prior segments centroids
         // TODO: for flush we are doing this over the vectors and here centroids which seems duplicative
@@ -750,7 +750,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
 
     @Override
     public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues) throws IOException {
-        // Widen byte vectors to float — legacy codecs always cluster in float space
+        // Byte fields are gated by supportsByteNative() in addField/mergeOneField and never reach here
         KMeansFloatVectorValues floatVectorValues = (KMeansFloatVectorValues) vectorValues;
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         return calculateCentroids(hierarchicalKMeans, floatVectorValues, fieldInfo);

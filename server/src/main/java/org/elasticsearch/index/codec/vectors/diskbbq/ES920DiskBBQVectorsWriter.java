@@ -645,12 +645,16 @@ public class ES920DiskBBQVectorsWriter extends IVFVectorsWriter<ES920DiskBBQVect
         ClusteringVectorValues<?> vectorValues,
         MergeState mergeState
     ) throws IOException {
+        // 9.2 indices intentionally do not participate in the tiered merge strategy: the on-disk
+        // layout would require a bespoke streaming centroid reader to surface priors, and the
+        // payoff (a transitional format that ages out) does not justify the added complexity.
+        // Fall back to the standard hierarchical rebuild so the 9.2 path stays minimal.
         return calculateCentroids(fieldInfo, vectorValues);
     }
 
     @Override
     public CentroidInformation<float[]> calculateCentroids(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues) throws IOException {
-        // Widen byte vectors to float — legacy codecs always cluster in float space
+        // Byte fields are gated by supportsByteNative() in addField/mergeOneField and never reach here
         KMeansFloatVectorValues floatVectorValues = (KMeansFloatVectorValues) vectorValues;
         HierarchicalKMeans<float[]> hierarchicalKMeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, floatVectorValues.dimension());
         return calculateCentroids(hierarchicalKMeans, floatVectorValues, fieldInfo);
