@@ -259,6 +259,7 @@ public class Preconditioner {
      * Returns a {@link FloatVectorValues} view that lazily applies the preconditioner rotation
      * to each vector on access. Used during merge where vectors are streamed from disk.
      */
+    // TODO: batch apply preconditioner for better performance and keep a batch on heap at a time
     public FloatVectorValues preconditionValues(FloatVectorValues vectors) {
         final float[] preconditionedVectorValue = new float[vectors.dimension()];
         return new FloatVectorValues() {

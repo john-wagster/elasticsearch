@@ -419,6 +419,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 centroidIndex = writeCentroidIndex(centroidSupplier, centroidAssignments.assignments(), ivfCentroids);
                 postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
 
+                // write posting lists
                 centroidOffsetAndLength = buildAndWriteBytePostingsLists(
                     fieldWriter.fieldInfo,
                     centroidSupplier,
@@ -741,11 +742,13 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             IndexOutput vectorsOut = mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "ivfvec_", IOContext.DEFAULT)
         ) {
             tempRawVectorsFileName = vectorsOut.getName();
+            // TODO: we only want to write this once but we'll wind up doing it for every field with the same dim and blockdim
             preconditioner = inheritPreconditioner(fieldInfo, mergeState, ivfSegmentConfig);
 
             final int vectorCount;
             if (isByte) {
                 ByteVectorValues mergedByteVectorValues = MergedVectorValues.mergeByteVectorValues(fieldInfo, mergeState);
+                // if the segment is dense, we don't need to do anything with docIds.
                 boolean dense = mergedByteVectorValues.size() == mergeState.segmentInfo.maxDoc();
                 try (
                     IndexOutput docsOut = dense
@@ -766,6 +769,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 if (preconditioner != null) {
                     mergedFloatVectorValues = preconditioner.preconditionValues(mergedFloatVectorValues);
                 }
+                // if the segment is dense, we don't need to do anything with docIds.
                 boolean dense = mergedFloatVectorValues.size() == mergeState.segmentInfo.maxDoc();
                 try (
                     IndexOutput docsOut = dense
@@ -831,9 +835,12 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             IndexOutput centroidTemp = null;
             boolean byteCentroidsWritten = false;
             try {
+                // TODO do this better, we shouldn't have to write to a temp file, we should be able to
+                // just from the merged vector values, the tricky part is the random access.
                 centroidTemp = mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "civf_", IOContext.DEFAULT);
                 centroidTempName = centroidTemp.getName();
                 CentroidInformation<?> centroidAssignments = calculateCentroids(fieldInfo, vectorValues, mergeState);
+                // write the centroids to a temporary file so we are not holding them on heap
                 if (supportsByteNative() && centroidAssignments.centroids() instanceof byte[][] byteCentroidArrays) {
                     // Write byte centroids to temp file
                     for (byte[] centroid : byteCentroidArrays) {
@@ -885,9 +892,11 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                         }
                         centroidSupplier = createCentroidSupplier(fieldInfo, byteCentroidArrays, assignments.globalCentroid());
 
+                        // write initial centroid index (we might need to read it later for overspilling)
                         centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
                         CI centroidIndex = writeCentroidIndex(centroidSupplier, assignments.assignments(), ivfCentroids);
 
+                        // write posting lists
                         postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
                         centroidOffsetAndLength = buildAndWriteBytePostingsLists(
                             fieldInfo,
@@ -902,6 +911,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                         );
                         postingListLength = ivfClusters.getFilePointer() - postingListOffset;
 
+                        // write the rest of the centroid data now we know the size of the postings
                         writeCentroidData(
                             fieldInfo,
                             centroidSupplier,
