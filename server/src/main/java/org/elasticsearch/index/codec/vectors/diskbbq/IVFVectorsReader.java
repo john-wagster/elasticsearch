@@ -30,7 +30,6 @@ import org.apache.lucene.store.DataInput;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.Bits;
-import org.apache.lucene.util.VectorUtil;
 import org.elasticsearch.core.IOUtils;
 import org.elasticsearch.index.codec.vectors.GenericFlatVectorReaders;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringFloatVectorValues;
@@ -323,13 +322,6 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
     }
 
     /**
-     * Returns true if this reader supports byte[] vector search
-     */
-    protected boolean supportsByteVectorSearch() {
-        return false;
-    }
-
-    /**
      * Returns true if this field has an IVF structure (centroids), false if it should fall back to the raw delegate.
      */
     private boolean hasIvfStructure(String field) {
@@ -353,22 +345,7 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
     @Override
     public final void search(String field, byte[] target, KnnCollector knnCollector, AcceptDocs acceptDocs) throws IOException {
         if (hasIvfStructure(field)) {
-            final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
-            if (supportsByteVectorSearch() && fieldInfo.getVectorSimilarityFunction() != VectorSimilarityFunction.COSINE) {
-                doSearch(field, new QueryTarget.ByteQuery(target), knnCollector, acceptDocs);
-            } else {
-                // for COSINE convert byte to float and normalize
-                // Note: For IVF queries, COSINE normalization is handled upstream in IVFKnnByteVectorQuery
-                // which routes through the float[] search path. This branch exists as a safety net for
-                // callers that invoke search(byte[]) directly (e.g. tests).
-                float[] floatTarget;
-                if (fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE) {
-                    floatTarget = cosineNormalize(target);
-                } else {
-                    floatTarget = byteToFloat(target);
-                }
-                doSearch(field, new QueryTarget.FloatQuery(floatTarget), knnCollector, acceptDocs);
-            }
+            doSearch(field, new QueryTarget.ByteQuery(target), knnCollector, acceptDocs);
         } else {
             // No IVF structure — byte fields on legacy codecs (which skip byte IVF indexing) fall
             // through here. Inline brute-force matches main's behavior and is required for CheckIndex
@@ -545,27 +522,6 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
         double sizeScale = Math.pow((double) CAP_REF_SIZE / numVectors, CAP_EXPONENT);
         double recallScale = 0.1 / (1.0 - DEFAULT_TARGET_RECALL);
         return (float) Math.min(1.0, CAP_COEFFICIENT * sizeScale * recallScale);
-    }
-
-    /**
-     * Converts a byte[] query vector to a float[] and L2-normalizes it for COSINE similarity search.
-     */
-    private static float[] cosineNormalize(byte[] target) {
-        // TODO:
-        float[] result = new float[target.length];
-        for (int i = 0; i < target.length; i++) {
-            result[i] = target[i];
-        }
-        VectorUtil.l2normalize(result);
-        return result;
-    }
-
-    private static float[] byteToFloat(byte[] bytes) {
-        float[] result = new float[bytes.length];
-        for (int i = 0; i < bytes.length; i++) {
-            result[i] = bytes[i];
-        }
-        return result;
     }
 
     @Override
