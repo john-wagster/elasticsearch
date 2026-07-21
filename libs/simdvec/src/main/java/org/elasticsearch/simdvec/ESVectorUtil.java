@@ -156,12 +156,7 @@ public class ESVectorUtil {
         if (a.length != b.length) {
             throw new IllegalArgumentException("vector dimensions incompatible: " + a.length + "!= " + b.length);
         }
-        float dist = 0;
-        for (int i = 0; i < a.length; i++) {
-            float diff = a[i] - b[i];
-            dist += diff * diff;
-        }
-        return dist;
+        return IMPL.squareDistance(a, b);
     }
 
     public static float squareDistance(float[] a, float[] b, int offset, int length) {
