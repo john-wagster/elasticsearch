@@ -223,7 +223,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
     public CentroidOffsetAndLength buildAndWritePostingsLists(
         FieldInfo fieldInfo,
         CentroidSupplier centroidSupplier,
-        FloatVectorValues floatVectorValues,
+        ClusteringVectorValues<?> vectorValues,
         IndexOutput postingsOutput,
         long fileOffset,
         int[] assignments,
@@ -233,6 +233,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         final IvfSegmentConfig segmentConfig = requireSegmentConfig(fieldWritingContext);
         final QuantEncoding effectiveQuantEncoding = segmentConfig.quantEncoding();
         FlatCentroidClusters centroidClusters = (FlatCentroidClusters) centroidSupplier.centroidIndex();
+        final boolean isByte = vectorValues instanceof ByteVectorValues;
+
         int[] centroidVectorCount = new int[centroidSupplier.size()];
         for (int i = 0; i < assignments.length; i++) {
             centroidVectorCount[assignments[i]]++;
@@ -266,150 +268,80 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         final PackedLongValues.Builder offsets = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
         final PackedLongValues.Builder lengths = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
         DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.fromBitSize(effectiveQuantEncoding.bits(), BULK_SIZE, postingsOutput, true, true);
-        OnHeapQuantizedVectors onHeapQuantizedVectors = new OnHeapQuantizedVectors(
-            floatVectorValues,
-            fieldInfo.getVectorSimilarityFunction(),
-            effectiveQuantEncoding,
-            fieldInfo.getVectorDimension(),
-            new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction())
-        );
-        final int[] docIds = new int[maxPostingListSize];
-        final int[] docDeltas = new int[maxPostingListSize];
-        final int[] clusterOrds = new int[maxPostingListSize];
-        DocIdsWriter idsWriter = new DocIdsWriter();
-        for (int c = 0; c < centroidSupplier.size(); c++) {
-            float[] centroid = centroidSupplier.centroid(c);
-            int[] cluster = assignmentsByCluster[c];
-            long offset = postingsOutput.alignFilePointer(Float.BYTES) - fileOffset;
-            offsets.add(offset);
-            postingsOutput.writeInt(Float.floatToIntBits(ESVectorUtil.squareDistance(centroid, centroidClusters.getCentroid(c))));
-            int size = cluster.length;
-            // write docIds
-            postingsOutput.writeVInt(size);
-            for (int j = 0; j < size; j++) {
-                docIds[j] = floatVectorValues.ordToDoc(cluster[j]);
-                clusterOrds[j] = j;
-            }
-            // sort cluster.buffer by docIds values, this way cluster ordinals are sorted by docIds
-            new IntSorter(clusterOrds, i -> docIds[i]).sort(0, size);
-            // encode doc deltas
-            for (int j = 0; j < size; j++) {
-                docDeltas[j] = j == 0 ? docIds[clusterOrds[j]] : docIds[clusterOrds[j]] - docIds[clusterOrds[j - 1]];
-            }
-            onHeapQuantizedVectors.reset(centroid, centroidClusters.getCentroid(c), size, ord -> cluster[clusterOrds[ord]]);
-            byte encoding = idsWriter.calculateBlockEncoding(i -> docDeltas[i], size, BULK_SIZE);
-            postingsOutput.writeByte(encoding);
-            if (sliceField != null) {
-                // We are not writing the docIds as we know they are writing in vector ord order.
-                // we will ise the delegated FloatVectorValue instance on read to do the translation for us.
-                assert centroidSupplier.size() == 1;
-                bulkWriter.writeVectors(onHeapQuantizedVectors, null);
-            } else {
-                bulkWriter.writeVectors(onHeapQuantizedVectors, i -> {
-                    // for vector i we write `bulk` size docs or the remaining docs
-                    idsWriter.writeDocIds(d -> docDeltas[i + d], Math.min(BULK_SIZE, size - i), encoding, postingsOutput);
-                });
-            }
-            lengths.add(postingsOutput.getFilePointer() - fileOffset - offset);
+        final QuantizedVectorValues quantizedVectors;
+        if (isByte) {
+            quantizedVectors = new OnHeapQuantizedByteVectors(
+                (ByteVectorValues) vectorValues,
+                fieldInfo.getVectorSimilarityFunction(),
+                effectiveQuantEncoding,
+                fieldInfo.getVectorDimension(),
+                new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction())
+            );
+        } else {
+            quantizedVectors = new OnHeapQuantizedVectors(
+                (FloatVectorValues) vectorValues,
+                fieldInfo.getVectorSimilarityFunction(),
+                effectiveQuantEncoding,
+                fieldInfo.getVectorDimension(),
+                new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction())
+            );
         }
-
-        if (logger.isDebugEnabled()) {
-            printClusterQualityStatistics(assignmentsByCluster);
-        }
-
-        return new CentroidOffsetAndLength(offsets.build(), lengths.build());
-    }
-
-    @Override
-    protected CentroidOffsetAndLength buildAndWriteBytePostingsLists(
-        FieldInfo fieldInfo,
-        CentroidSupplier centroidSupplier,
-        ByteVectorValues byteVectorValues,
-        IndexOutput postingsOutput,
-        long fileOffset,
-        int[] assignments,
-        OverspillAssignments overspillAssignments,
-        IvfSegmentConfig fieldWritingContext
-    ) throws IOException {
-        final IvfSegmentConfig segmentConfig = requireSegmentConfig(fieldWritingContext);
-        final QuantEncoding effectiveQuantEncoding = segmentConfig.quantEncoding();
-        FlatCentroidClusters centroidClusters = (FlatCentroidClusters) centroidSupplier.centroidIndex();
-
-        int[] centroidVectorCount = new int[centroidSupplier.size()];
-        for (int i = 0; i < assignments.length; i++) {
-            centroidVectorCount[assignments[i]]++;
-            for (var it = overspillAssignments.getAssignmentsFor(i); it.hasNext();) {
-                centroidVectorCount[it.nextInt()]++;
-            }
-        }
-
-        int maxPostingListSize = 0;
-        int[][] assignmentsByCluster = new int[centroidSupplier.size()][];
-        for (int c = 0; c < centroidSupplier.size(); c++) {
-            int size = centroidVectorCount[c];
-            maxPostingListSize = Math.max(maxPostingListSize, size);
-            assignmentsByCluster[c] = new int[size];
-        }
-        Arrays.fill(centroidVectorCount, 0);
-
-        for (int i = 0; i < assignments.length; i++) {
-            int c = assignments[i];
-            assignmentsByCluster[c][centroidVectorCount[c]++] = i;
-            for (var it = overspillAssignments.getAssignmentsFor(i); it.hasNext();) {
-                int s = it.nextInt();
-                assignmentsByCluster[s][centroidVectorCount[s]++] = i;
-            }
-        }
-
-        final PackedLongValues.Builder offsets = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
-        final PackedLongValues.Builder lengths = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
-        DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.fromBitSize(effectiveQuantEncoding.bits(), BULK_SIZE, postingsOutput, true, true);
-        OnHeapQuantizedByteVectors onHeapQuantizedByteVectors = new OnHeapQuantizedByteVectors(
-            byteVectorValues,
-            fieldInfo.getVectorSimilarityFunction(),
-            effectiveQuantEncoding,
-            fieldInfo.getVectorDimension(),
-            new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction())
-        );
         final int[] docIdsScratch = new int[maxPostingListSize];
         final int[] docDeltas = new int[maxPostingListSize];
         final int[] clusterOrds = new int[maxPostingListSize];
         DocIdsWriter idsWriter = new DocIdsWriter();
-
-        // Scratch for computing squareDistance between byte centroid and float parent
-        float[] centroidFloat = new float[fieldInfo.getVectorDimension()];
+        // Scratch for byte centroid → float widening (only needed for byte path squareDistance)
+        float[] centroidFloat = isByte ? new float[fieldInfo.getVectorDimension()] : null;
 
         for (int c = 0; c < centroidSupplier.size(); c++) {
-            byte[] centroid = centroidSupplier.byteCentroid(c);
             float[] parentCentroid = centroidClusters.getCentroid(c);
             int[] cluster = assignmentsByCluster[c];
             long offset = postingsOutput.alignFilePointer(Float.BYTES) - fileOffset;
             offsets.add(offset);
 
-            // squareDistance between byte centroid and float parent centroid
-            for (int d = 0; d < centroid.length; d++) {
-                centroidFloat[d] = centroid[d];
+            if (isByte) {
+                byte[] centroid = centroidSupplier.byteCentroid(c);
+                for (int d = 0; d < centroid.length; d++) {
+                    centroidFloat[d] = centroid[d];
+                }
+                postingsOutput.writeInt(Float.floatToIntBits(ESVectorUtil.squareDistance(centroidFloat, parentCentroid)));
+            } else {
+                float[] centroid = centroidSupplier.centroid(c);
+                postingsOutput.writeInt(Float.floatToIntBits(ESVectorUtil.squareDistance(centroid, parentCentroid)));
             }
-            postingsOutput.writeInt(Float.floatToIntBits(ESVectorUtil.squareDistance(centroidFloat, parentCentroid)));
 
             int size = cluster.length;
+            // write docIds
             postingsOutput.writeVInt(size);
             for (int j = 0; j < size; j++) {
-                docIdsScratch[j] = byteVectorValues.ordToDoc(cluster[j]);
+                docIdsScratch[j] = vectorValues.ordToDoc(cluster[j]);
                 clusterOrds[j] = j;
             }
+            // sort cluster.buffer by docIds values, this way cluster ordinals are sorted by docIds
             new IntSorter(clusterOrds, i -> docIdsScratch[i]).sort(0, size);
+            // encode doc deltas
             for (int j = 0; j < size; j++) {
                 docDeltas[j] = j == 0 ? docIdsScratch[clusterOrds[j]] : docIdsScratch[clusterOrds[j]] - docIdsScratch[clusterOrds[j - 1]];
             }
-            onHeapQuantizedByteVectors.reset(centroid, parentCentroid, size, ord -> cluster[clusterOrds[ord]]);
+
+            if (isByte) {
+                byte[] centroid = centroidSupplier.byteCentroid(c);
+                ((OnHeapQuantizedByteVectors) quantizedVectors).reset(centroid, parentCentroid, size, ord -> cluster[clusterOrds[ord]]);
+            } else {
+                float[] centroid = centroidSupplier.centroid(c);
+                ((OnHeapQuantizedVectors) quantizedVectors).reset(centroid, parentCentroid, size, ord -> cluster[clusterOrds[ord]]);
+            }
+
             byte encoding = idsWriter.calculateBlockEncoding(i -> docDeltas[i], size, BULK_SIZE);
             postingsOutput.writeByte(encoding);
             if (sliceField != null) {
+                // We are not writing the docIds as we know they are writing in vector ord order.
+                // we will use the delegated instance on read to do the translation for us.
                 assert centroidSupplier.size() == 1;
-                bulkWriter.writeVectors(onHeapQuantizedByteVectors, null);
+                bulkWriter.writeVectors(quantizedVectors, null);
             } else {
-                bulkWriter.writeVectors(onHeapQuantizedByteVectors, i -> {
+                bulkWriter.writeVectors(quantizedVectors, i -> {
+                    // for vector i we write `bulk` size docs or the remaining docs
                     idsWriter.writeDocIds(d -> docDeltas[i + d], Math.min(BULK_SIZE, size - i), encoding, postingsOutput);
                 });
             }

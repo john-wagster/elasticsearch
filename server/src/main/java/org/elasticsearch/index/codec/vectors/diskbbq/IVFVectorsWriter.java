@@ -187,7 +187,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
      *
      * @param fieldInfo            field info
      * @param centroidSupplier     the computed centroids and centroid index
-     * @param floatVectorValues    the raw vectors
+     * @param vectorValues         the raw vectors
      * @param postingsOutput       clusters file output
      * @param fileOffset           base offset in {@code postingsOutput} that the returned offsets and lengths are relative to
      * @param assignments          for each vector ordinal, the ordinal of the centroid it was primarily assigned to
@@ -198,7 +198,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
     public abstract CentroidOffsetAndLength buildAndWritePostingsLists(
         FieldInfo fieldInfo,
         CentroidSupplier centroidSupplier,
-        FloatVectorValues floatVectorValues,
+        ClusteringVectorValues<?> vectorValues,
         IndexOutput postingsOutput,
         long fileOffset,
         int[] assignments,
@@ -286,50 +286,6 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
     }
 
     /**
-     * Builds and writes byte-native posting lists. Codec versions that do not support byte-native
-     * postings should leave this default (throws).
-     */
-    protected CentroidOffsetAndLength buildAndWriteBytePostingsLists(
-        FieldInfo fieldInfo,
-        CentroidSupplier centroidSupplier,
-        ByteVectorValues byteVectorValues,
-        IndexOutput postingsOutput,
-        long fileOffset,
-        int[] assignments,
-        OverspillAssignments overspillAssignments,
-        IvfSegmentConfig ivfSegmentConfig
-    ) throws IOException {
-        throw new UnsupportedOperationException("Byte-native postings not supported by this codec version");
-    }
-
-    /**
-     * Builds and writes byte-native posting lists during merge. Codec versions that do not support
-     * byte-native postings should leave this default (delegates to flush overload).
-     */
-    protected CentroidOffsetAndLength buildAndWriteBytePostingsLists(
-        FieldInfo fieldInfo,
-        CentroidSupplier centroidSupplier,
-        ByteVectorValues byteVectorValues,
-        IndexOutput postingsOutput,
-        long fileOffset,
-        MergeState mergeState,
-        int[] assignments,
-        OverspillAssignments overspillAssignments,
-        IvfSegmentConfig ivfSegmentConfig
-    ) throws IOException {
-        return buildAndWriteBytePostingsLists(
-            fieldInfo,
-            centroidSupplier,
-            byteVectorValues,
-            postingsOutput,
-            fileOffset,
-            assignments,
-            overspillAssignments,
-            ivfSegmentConfig
-        );
-    }
-
-    /**
      * Inherits a preconditioner from one of the merging segments, or creates a new one if none
      * is available. Returns {@code null} if preconditioning is not enabled for this format.
      *
@@ -414,50 +370,36 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
 
             if (supportsByteNative() && centroidAssignments.centroids() instanceof byte[][] byteCentroidArrays) {
                 centroidSupplier = createCentroidSupplier(fieldWriter.fieldInfo, byteCentroidArrays, globalCentroid);
-                centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
-                // write initial centroid index (we might need to read it later for overspilling)
-                centroidIndex = writeCentroidIndex(centroidSupplier, centroidAssignments.assignments(), ivfCentroids);
-                postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
-
-                // write posting lists
-                centroidOffsetAndLength = buildAndWriteBytePostingsLists(
-                    fieldWriter.fieldInfo,
-                    centroidSupplier,
-                    (ByteVectorValues) clusteringVectorValues,
-                    ivfClusters,
-                    postingListOffset,
-                    centroidAssignments.assignments(),
-                    centroidAssignments.overspillAssignments(),
-                    ivfSegmentConfig
-                );
-                postingListLength = ivfClusters.getFilePointer() - postingListOffset;
             } else {
                 @SuppressWarnings("unchecked")
                 CentroidInformation<float[]> floatCentroidInfo = (CentroidInformation<float[]>) centroidAssignments;
                 centroidSupplier = createCentroidSupplier(fieldWriter.fieldInfo, floatCentroidInfo.centroids(), globalCentroid);
-                centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
-                // write initial centroid index (we might need to read it later for overspilling)
-                centroidIndex = writeCentroidIndex(centroidSupplier, centroidAssignments.assignments(), ivfCentroids);
-                postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
-                // For byte fields with float centroids (e.g. flat threshold), widen byte vectors to float
-                final FloatVectorValues postingsVectorValues;
-                if (clusteringVectorValues instanceof FloatVectorValues fvv) {
-                    postingsVectorValues = fvv;
-                } else {
-                    postingsVectorValues = asFloatVectorValues(fieldWriter.fieldInfo, clusteringVectorValues);
-                }
-                centroidOffsetAndLength = buildAndWritePostingsLists(
-                    fieldWriter.fieldInfo,
-                    centroidSupplier,
-                    postingsVectorValues,
-                    ivfClusters,
-                    postingListOffset,
-                    centroidAssignments.assignments(),
-                    centroidAssignments.overspillAssignments(),
-                    ivfSegmentConfig
-                );
-                postingListLength = ivfClusters.getFilePointer() - postingListOffset;
             }
+            centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
+            // write initial centroid index (we might need to read it later for overspilling)
+            centroidIndex = writeCentroidIndex(centroidSupplier, centroidAssignments.assignments(), ivfCentroids);
+            postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
+
+            // For byte fields with float centroids (e.g. flat threshold), widen byte vectors to float
+            final ClusteringVectorValues<?> postingsVectorValues;
+            if (clusteringVectorValues instanceof ByteVectorValues && centroidSupplier.byteCentroid(0) == null) {
+                postingsVectorValues = asFloatVectorValues(fieldWriter.fieldInfo, clusteringVectorValues);
+            } else {
+                postingsVectorValues = clusteringVectorValues;
+            }
+
+            // write posting lists
+            centroidOffsetAndLength = buildAndWritePostingsLists(
+                fieldWriter.fieldInfo,
+                centroidSupplier,
+                postingsVectorValues,
+                ivfClusters,
+                postingListOffset,
+                centroidAssignments.assignments(),
+                centroidAssignments.overspillAssignments(),
+                ivfSegmentConfig
+            );
+            postingListLength = ivfClusters.getFilePointer() - postingListOffset;
 
             // write the rest of the centroid data now we know the size of the postings
             writeCentroidData(
@@ -898,13 +840,12 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
 
                         // write posting lists
                         postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
-                        centroidOffsetAndLength = buildAndWriteBytePostingsLists(
+                        centroidOffsetAndLength = buildAndWritePostingsLists(
                             fieldInfo,
                             centroidSupplier,
                             byteVectorValues,
                             ivfClusters,
                             postingListOffset,
-                            mergeState,
                             assignments.assignments(),
                             assignments.overspillAssignments(),
                             ivfSegmentConfig
