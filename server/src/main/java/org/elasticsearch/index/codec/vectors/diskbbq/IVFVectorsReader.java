@@ -370,7 +370,9 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
                 doSearch(field, new QueryTarget.FloatQuery(floatTarget), knnCollector, acceptDocs);
             }
         } else {
-            // No IVF structure for this field — brute-force search over raw byte vectors
+            // No IVF structure — byte fields on legacy codecs (which skip byte IVF indexing) fall
+            // through here. Inline brute-force matches main's behavior and is required for CheckIndex
+            // compatibility (delegating to getReaderForField().search() fails CheckIndex validation).
             final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
             final ByteVectorValues values = getReaderForField(field).getByteVectorValues(field);
             for (int i = 0; i < values.size(); i++) {

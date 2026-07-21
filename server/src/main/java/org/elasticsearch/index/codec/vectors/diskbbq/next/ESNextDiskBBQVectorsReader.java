@@ -20,7 +20,6 @@ import org.apache.lucene.search.KnnCollector;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.LongValues;
-import org.apache.lucene.util.VectorUtil;
 import org.apache.lucene.util.packed.DirectReader;
 import org.apache.lucene.util.packed.DirectWriter;
 import org.elasticsearch.index.codec.vectors.GenericFlatVectorReaders;
@@ -153,10 +152,6 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 float[] widened = new float[bq.vector().length];
                 for (int i = 0; i < bq.vector().length; i++) {
                     widened[i] = bq.vector()[i];
-                }
-                // COSINE requires unit-normalized queries for the scalar quantizer
-                if (fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE) {
-                    VectorUtil.l2normalize(widened);
                 }
                 yield widened;
             }
@@ -534,7 +529,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         private final float[] globalCentroid;
         private final float[] centroidScratch;
         private final boolean byteBacked;
-        private final boolean cosine;
+
         private int currentCentroidOrdinal = -2;
         private int nextCentroidOrdinal = -1;
         private byte[] evictedQuantizedQuery = null;
@@ -557,7 +552,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             this.parentsSlice = parentsSlice;
             this.globalCentroid = globalCentroid;
             this.byteBacked = byteBacked;
-            this.cosine = fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE;
+
             this.cache = new LinkedHashMap<>(QUERY_CACHE_SIZE, 0.75f, true) {
                 @Override
                 protected boolean removeEldestEntry(Map.Entry<Integer, QueryQuantizerResult> eldest) {
@@ -604,10 +599,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                     assert nextCentroidOrdinal == NO_ORDINAL;
                     queryCentroid = globalCentroid;
                 }
-                // COSINE requires unit-normalized centroids for the scalar quantizer
-                if (cosine) {
-                    VectorUtil.l2normalize(queryCentroid);
-                }
+
                 OptimizedScalarQuantizer.QuantizationResult queryCorrections = quantizer.scalarQuantize(
                     target,
                     scratch,
