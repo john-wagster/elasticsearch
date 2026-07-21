@@ -9,7 +9,6 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq;
 
-import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
@@ -254,54 +253,6 @@ public class Preconditioner {
                 }
             }
         }
-    }
-
-    /**
-     * Returns a {@link FloatVectorValues} view that lazily applies the preconditioner rotation
-     * to each vector on access. Used during merge where vectors are streamed from disk.
-     */
-    // TODO: batch apply preconditioner for better performance and keep a batch on heap at a time
-    public FloatVectorValues preconditionValues(FloatVectorValues vectors) {
-        final float[] preconditionedVectorValue = new float[vectors.dimension()];
-        return new FloatVectorValues() {
-            int cachedOrd = -1;
-
-            @Override
-            public int getVectorByteLength() {
-                return vectors.getVectorByteLength();
-            }
-
-            @Override
-            public float[] vectorValue(int ord) throws IOException {
-                assert ord != -1;
-                if (ord != cachedOrd) {
-                    float[] vectorValue = vectors.vectorValue(ord);
-                    applyTransform(vectorValue, preconditionedVectorValue);
-                    cachedOrd = ord;
-                }
-                return preconditionedVectorValue;
-            }
-
-            @Override
-            public FloatVectorValues copy() throws IOException {
-                return vectors.copy();
-            }
-
-            @Override
-            public int dimension() {
-                return vectors.dimension();
-            }
-
-            @Override
-            public int size() {
-                return vectors.size();
-            }
-
-            @Override
-            public DocIndexIterator iterator() {
-                return vectors.iterator();
-            }
-        };
     }
 
     public void write(IndexOutput out) throws IOException {

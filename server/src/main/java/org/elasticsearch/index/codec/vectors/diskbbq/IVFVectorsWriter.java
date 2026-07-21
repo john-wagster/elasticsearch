@@ -686,45 +686,27 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             // TODO: we only want to write this once but we'll wind up doing it for every field with the same dim and blockdim
             preconditioner = inheritPreconditioner(fieldInfo, mergeState, ivfSegmentConfig);
 
-            final int vectorCount;
+            final KnnVectorValues mergedVectorValues;
             if (isByte) {
-                ByteVectorValues mergedByteVectorValues = MergedVectorValues.mergeByteVectorValues(fieldInfo, mergeState);
-                // if the segment is dense, we don't need to do anything with docIds.
-                boolean dense = mergedByteVectorValues.size() == mergeState.segmentInfo.maxDoc();
-                try (
-                    IndexOutput docsOut = dense
-                        ? null
-                        : mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "ivfdoc_", IOContext.DEFAULT)
-                ) {
-                    if (docsOut != null) {
-                        docsFileName = docsOut.getName();
-                    }
-                    vectorCount = writeByteVectorValues(fieldInfo, docsOut, vectorsOut, mergedByteVectorValues, preconditioner);
-                    CodecUtil.writeFooter(vectorsOut);
-                    if (docsOut != null) {
-                        CodecUtil.writeFooter(docsOut);
-                    }
-                }
+                mergedVectorValues = MergedVectorValues.mergeByteVectorValues(fieldInfo, mergeState);
             } else {
-                FloatVectorValues mergedFloatVectorValues = MergedVectorValues.mergeFloatVectorValues(fieldInfo, mergeState);
-                if (preconditioner != null) {
-                    mergedFloatVectorValues = preconditioner.preconditionValues(mergedFloatVectorValues);
+                mergedVectorValues = MergedVectorValues.mergeFloatVectorValues(fieldInfo, mergeState);
+            }
+            // if the segment is dense, we don't need to do anything with docIds.
+            boolean dense = mergedVectorValues.size() == mergeState.segmentInfo.maxDoc();
+            final int vectorCount;
+            try (
+                IndexOutput docsOut = dense
+                    ? null
+                    : mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "ivfdoc_", IOContext.DEFAULT)
+            ) {
+                if (docsOut != null) {
+                    docsFileName = docsOut.getName();
                 }
-                // if the segment is dense, we don't need to do anything with docIds.
-                boolean dense = mergedFloatVectorValues.size() == mergeState.segmentInfo.maxDoc();
-                try (
-                    IndexOutput docsOut = dense
-                        ? null
-                        : mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "ivfdoc_", IOContext.DEFAULT)
-                ) {
-                    if (docsOut != null) {
-                        docsFileName = docsOut.getName();
-                    }
-                    vectorCount = writeFloatVectorValues(fieldInfo, docsOut, vectorsOut, mergedFloatVectorValues);
-                    CodecUtil.writeFooter(vectorsOut);
-                    if (docsOut != null) {
-                        CodecUtil.writeFooter(docsOut);
-                    }
+                vectorCount = writeVectorValues(fieldInfo, docsOut, vectorsOut, mergedVectorValues, preconditioner);
+                CodecUtil.writeFooter(vectorsOut);
+                if (docsOut != null) {
+                    CodecUtil.writeFooter(docsOut);
                 }
             }
             numVectors = vectorCount;
@@ -949,46 +931,47 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         return KMeansFloatVectorValues.build(vectors, docs, numVectors, fieldInfo.getVectorDimension());
     }
 
-    private static int writeFloatVectorValues(
+    private static int writeVectorValues(
         FieldInfo fieldInfo,
         IndexOutput docsOut,
         IndexOutput vectorsOut,
-        FloatVectorValues floatVectorValues
-    ) throws IOException {
-        int numVectors = 0;
-        final ByteBuffer buffer = ByteBuffer.allocate(fieldInfo.getVectorDimension() * Float.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-        final KnnVectorValues.DocIndexIterator iterator = floatVectorValues.iterator();
-        for (int docV = iterator.nextDoc(); docV != NO_MORE_DOCS; docV = iterator.nextDoc()) {
-            numVectors++;
-            buffer.asFloatBuffer().put(floatVectorValues.vectorValue(iterator.index()));
-            vectorsOut.writeBytes(buffer.array(), buffer.array().length);
-            if (docsOut != null) {
-                docsOut.writeInt(iterator.docID());
-            }
-        }
-        return numVectors;
-    }
-
-    private static int writeByteVectorValues(
-        FieldInfo fieldInfo,
-        IndexOutput docsOut,
-        IndexOutput vectorsOut,
-        ByteVectorValues byteVectorValues,
+        KnnVectorValues mergedVectorValues,
         Preconditioner preconditioner
     ) throws IOException {
         int numVectors = 0;
         int dim = fieldInfo.getVectorDimension();
-        float[] scratch = preconditioner != null ? new float[dim] : null;
-        byte[] preconditionedScratch = preconditioner != null ? new byte[dim] : null;
-        final KnnVectorValues.DocIndexIterator iterator = byteVectorValues.iterator();
+        VectorEncoding encoding = fieldInfo.getVectorEncoding();
+
+        // Encoding-specific scratch buffers
+        final ByteBuffer floatBuffer = encoding == VectorEncoding.FLOAT32
+            ? ByteBuffer.allocate(dim * Float.BYTES).order(ByteOrder.LITTLE_ENDIAN)
+            : null;
+        final float[] floatScratch = preconditioner != null ? new float[dim] : null;
+        final byte[] byteScratch = (encoding == VectorEncoding.BYTE && preconditioner != null) ? new byte[dim] : null;
+
+        final KnnVectorValues.DocIndexIterator iterator = mergedVectorValues.iterator();
         for (int docV = iterator.nextDoc(); docV != NO_MORE_DOCS; docV = iterator.nextDoc()) {
             numVectors++;
-            byte[] vector = byteVectorValues.vectorValue(iterator.index());
-            if (preconditioner != null) {
-                preconditioner.applyTransformToBytes(vector, preconditionedScratch, scratch);
-                vectorsOut.writeBytes(preconditionedScratch, preconditionedScratch.length);
-            } else {
-                vectorsOut.writeBytes(vector, vector.length);
+            switch (encoding) {
+                case BYTE -> {
+                    byte[] vector = ((ByteVectorValues) mergedVectorValues).vectorValue(iterator.index());
+                    if (preconditioner != null) {
+                        preconditioner.applyTransformToBytes(vector, byteScratch, floatScratch);
+                        vectorsOut.writeBytes(byteScratch, dim);
+                    } else {
+                        vectorsOut.writeBytes(vector, dim);
+                    }
+                }
+                case FLOAT32 -> {
+                    float[] vector = ((FloatVectorValues) mergedVectorValues).vectorValue(iterator.index());
+                    if (preconditioner != null) {
+                        preconditioner.applyTransform(vector, floatScratch);
+                        floatBuffer.asFloatBuffer().put(floatScratch);
+                    } else {
+                        floatBuffer.asFloatBuffer().put(vector);
+                    }
+                    vectorsOut.writeBytes(floatBuffer.array(), floatBuffer.array().length);
+                }
             }
             if (docsOut != null) {
                 docsOut.writeInt(iterator.docID());
