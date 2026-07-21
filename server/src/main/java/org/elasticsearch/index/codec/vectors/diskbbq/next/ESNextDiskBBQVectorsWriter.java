@@ -1136,8 +1136,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         private final int numCentroids;
         private final int dimension;
         private final float[] scratch;
+        private final byte[] byteScratch; // null for FLOAT32
         private final KMeansResult<float[]> clusters;
         private final CentroidSlices centroidSlices;
+        private final VectorEncoding encoding;
         private int currOrd = -1;
 
         OffHeapCentroidSupplier(
@@ -1151,6 +1153,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             this.numCentroids = numCentroids;
             this.dimension = info.getVectorDimension();
             this.scratch = new float[dimension];
+            this.encoding = info.getVectorEncoding();
+            this.byteScratch = encoding == VectorEncoding.BYTE ? new byte[dimension] : null;
             this.clusters = clusters;
             this.centroidSlices = centroidSlices;
         }
@@ -1160,15 +1164,38 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             return numCentroids;
         }
 
+        private void readByteCentroid(int centroidOrdinal) throws IOException {
+            if (centroidOrdinal != currOrd) {
+                centroidsInput.seek((long) centroidOrdinal * dimension);
+                centroidsInput.readBytes(byteScratch, 0, dimension);
+                for (int d = 0; d < dimension; d++) {
+                    scratch[d] = byteScratch[d];
+                }
+                currOrd = centroidOrdinal;
+            }
+        }
+
         @Override
         public float[] centroid(int centroidOrdinal) throws IOException {
-            if (centroidOrdinal == currOrd) {
+            if (encoding == VectorEncoding.BYTE) {
+                readByteCentroid(centroidOrdinal);
                 return scratch;
             }
-            centroidsInput.seek((long) centroidOrdinal * dimension * Float.BYTES);
-            centroidsInput.readFloats(scratch, 0, dimension);
-            this.currOrd = centroidOrdinal;
+            if (centroidOrdinal != currOrd) {
+                centroidsInput.seek((long) centroidOrdinal * dimension * Float.BYTES);
+                centroidsInput.readFloats(scratch, 0, dimension);
+                currOrd = centroidOrdinal;
+            }
             return scratch;
+        }
+
+        @Override
+        public byte[] byteCentroid(int centroidOrdinal) throws IOException {
+            if (encoding != VectorEncoding.BYTE) {
+                return null;
+            }
+            readByteCentroid(centroidOrdinal);
+            return byteScratch;
         }
 
         @Override
@@ -1183,6 +1210,18 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
 
         @Override
         public KMeansFloatVectorValues asKmeansFloatVectorValues() throws IOException {
+            if (encoding == VectorEncoding.BYTE) {
+                List<float[]> floatCentroids = new ArrayList<>(numCentroids);
+                for (int i = 0; i < numCentroids; i++) {
+                    centroidsInput.seek((long) i * dimension);
+                    float[] fc = new float[dimension];
+                    for (int d = 0; d < dimension; d++) {
+                        fc[d] = centroidsInput.readByte();
+                    }
+                    floatCentroids.add(fc);
+                }
+                return KMeansFloatVectorValues.build(floatCentroids, null, dimension);
+            }
             return KMeansFloatVectorValues.build(centroidsInput, null, numCentroids, dimension);
         }
     }

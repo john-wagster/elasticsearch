@@ -806,18 +806,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                     final CentroidSupplier centroidSupplier;
                     final CentroidOffsetAndLength centroidOffsetAndLength;
 
-                    // Create centroid supplier (encoding-specific)
-                    if (byteCentroidsWritten && byteVectorValues != null) {
-                        // Read byte centroids from temp into on-heap byte[][] (centroids are small)
-                        int dim = fieldInfo.getVectorDimension();
-                        byte[][] byteCentroidArrays = new byte[assignments.numCentroids()][dim];
-                        for (int i = 0; i < byteCentroidArrays.length; i++) {
-                            centroidsInput.readBytes(byteCentroidArrays[i], 0, dim);
-                        }
-                        centroidSupplier = createCentroidSupplier(fieldInfo, byteCentroidArrays, assignments.globalCentroid());
-                    } else {
-                        centroidSupplier = createCentroidSupplier(centroidsInput, assignments, fieldInfo);
-                    }
+                    centroidSupplier = createCentroidSupplier(centroidsInput, assignments, fieldInfo);
 
                     // write initial centroid index (we might need to read it later for overspilling)
                     centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
