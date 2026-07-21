@@ -470,19 +470,16 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         if (numParents > 0) {
             // unused
             int longestPostingList = centroidSlice.readVInt();
-            // Centroids are stored as bytes when byteCentroids is set, otherwise as floats.
-            // However, PARENT centroids (second-level cluster centers) are always stored as floats
+            // Parent centroids (second-level cluster centers) are always stored as floats
             // since they are arithmetic means of leaf centroids and don't fit in byte range.
-            boolean parentsByteBacked = false;
-            int bytesPerComponent = parentsByteBacked ? Byte.BYTES : Float.BYTES;
             IndexInput parentsSlice = centroidSlice.slice(
                 "parents-slice",
                 centroidSlice.getFilePointer(),
-                (long) numParents * fieldInfo.getVectorDimension() * bytesPerComponent
+                (long) numParents * fieldInfo.getVectorDimension() * Float.BYTES
             );
-            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, parentsSlice, entry.globalCentroid(), parentsByteBacked);
+            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, parentsSlice, entry.globalCentroid());
         } else {
-            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, null, entry.globalCentroid(), false);
+            queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, null, entry.globalCentroid());
         }
         if (entry.numSlices == 0) {
             // Sliced segment without per-slice centroid structure (e.g. byte fields during flush).
@@ -528,21 +525,13 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         private final IndexInput parentsSlice;
         private final float[] globalCentroid;
         private final float[] centroidScratch;
-        private final boolean byteBacked;
 
         private int currentCentroidOrdinal = -2;
         private int nextCentroidOrdinal = -1;
         private byte[] evictedQuantizedQuery = null;
         private QueryQuantizerResult result = null;
 
-        QueryQuantizer(
-            QuantEncoding quantEncoding,
-            FieldInfo fieldInfo,
-            float[] target,
-            IndexInput parentsSlice,
-            float[] globalCentroid,
-            boolean byteBacked
-        ) {
+        QueryQuantizer(QuantEncoding quantEncoding, FieldInfo fieldInfo, float[] target, IndexInput parentsSlice, float[] globalCentroid) {
             this.quantEncoding = quantEncoding;
             this.target = target;
             this.scratch = new float[fieldInfo.getVectorDimension()];
@@ -551,7 +540,6 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             this.quantizer = new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction(), DEFAULT_LAMBDA, 1);
             this.parentsSlice = parentsSlice;
             this.globalCentroid = globalCentroid;
-            this.byteBacked = byteBacked;
 
             this.cache = new LinkedHashMap<>(QUERY_CACHE_SIZE, 0.75f, true) {
                 @Override
@@ -585,15 +573,9 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 final float[] queryCentroid;
                 if (parentsSlice != null) {
                     assert nextCentroidOrdinal >= 0;
-                    if (byteBacked) {
-                        parentsSlice.seek((long) nextCentroidOrdinal * centroidScratch.length);
-                        for (int d = 0; d < centroidScratch.length; d++) {
-                            centroidScratch[d] = parentsSlice.readByte();
-                        }
-                    } else {
-                        parentsSlice.seek((long) nextCentroidOrdinal * centroidScratch.length * Float.BYTES);
-                        parentsSlice.readFloats(centroidScratch, 0, centroidScratch.length);
-                    }
+                    // Parent centroids are always stored as floats
+                    parentsSlice.seek((long) nextCentroidOrdinal * centroidScratch.length * Float.BYTES);
+                    parentsSlice.readFloats(centroidScratch, 0, centroidScratch.length);
                     queryCentroid = centroidScratch;
                 } else {
                     assert nextCentroidOrdinal == NO_ORDINAL;
