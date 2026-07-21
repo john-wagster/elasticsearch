@@ -34,8 +34,8 @@ import org.apache.lucene.util.IORunnable;
 import org.apache.lucene.util.LongValues;
 import org.elasticsearch.core.IOUtils;
 import org.elasticsearch.core.SuppressForbidden;
+import org.elasticsearch.index.codec.vectors.cluster.CentroidOps;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringByteVectorValues;
-import org.elasticsearch.index.codec.vectors.cluster.ClusteringFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansByteVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
@@ -538,26 +538,25 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         int dimension = fieldInfo.getVectorDimension();
         int count = vectorValues.size();
         float[] centroid = new float[dimension];
-        if (vectorValues instanceof ClusteringFloatVectorValues floatValues) {
-            for (int i = 0; i < count; i++) {
-                float[] vector = floatValues.vectorValue(i);
-                for (int d = 0; d < dimension; d++) {
-                    centroid[d] += vector[d];
-                }
-            }
-        } else if (vectorValues instanceof ClusteringByteVectorValues byteValues) {
-            for (int i = 0; i < count; i++) {
-                byte[] vector = byteValues.vectorValue(i);
-                for (int d = 0; d < dimension; d++) {
-                    centroid[d] += vector[d];
-                }
-            }
-        }
+        accumulateVectors(fieldInfo.getVectorEncoding(), vectorValues, centroid);
         for (int d = 0; d < dimension; d++) {
             centroid[d] /= count;
         }
         // For flat centroid assignments there is a single global centroid and no secondary centroid assignments
         return CentroidInformation.ofFloat(dimension, new float[][] { centroid }, new int[count], OverspillAssignments.NONE);
+    }
+
+    /**
+     * Accumulates all vector components into a float buffer, dispatching to the appropriate
+     * {@link CentroidOps} based on the field's vector encoding.
+     */
+    @SuppressWarnings("unchecked")
+    private static void accumulateVectors(VectorEncoding encoding, ClusteringVectorValues<?> vectorValues, float[] accumulator)
+        throws IOException {
+        switch (encoding) {
+            case BYTE -> CentroidOps.BYTE.accumulateAll((ClusteringVectorValues<byte[]>) vectorValues, accumulator);
+            case FLOAT32 -> CentroidOps.FLOAT.accumulateAll((ClusteringVectorValues<float[]>) vectorValues, accumulator);
+        }
     }
 
     /**
