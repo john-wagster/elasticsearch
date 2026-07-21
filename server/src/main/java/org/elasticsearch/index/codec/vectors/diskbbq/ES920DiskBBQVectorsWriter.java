@@ -219,7 +219,7 @@ public class ES920DiskBBQVectorsWriter extends IVFVectorsWriter<ES920DiskBBQVect
     public CentroidOffsetAndLength buildAndWritePostingsLists(
         FieldInfo fieldInfo,
         CentroidSupplier centroidSupplier,
-        FloatVectorValues floatVectorValues,
+        ClusteringVectorValues<?> vectorValues,
         IndexOutput postingsOutput,
         long fileOffset,
         MergeState mergeState,
@@ -227,6 +227,7 @@ public class ES920DiskBBQVectorsWriter extends IVFVectorsWriter<ES920DiskBBQVect
         OverspillAssignments overspillAssignments,
         IvfSegmentConfig ivfSegmentConfig
     ) throws IOException {
+        FloatVectorValues floatVectorValues = (FloatVectorValues) vectorValues;
         // first, quantize all the vectors into a temporary file
         String quantizedVectorsTempName = null;
         try (

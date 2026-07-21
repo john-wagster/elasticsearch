@@ -284,7 +284,7 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
     public CentroidOffsetAndLength buildAndWritePostingsLists(
         FieldInfo fieldInfo,
         CentroidSupplier centroidSupplier,
-        FloatVectorValues floatVectorValues,
+        ClusteringVectorValues<?> vectorValues,
         IndexOutput postingsOutput,
         long fileOffset,
         MergeState mergeState,
@@ -292,6 +292,7 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
         OverspillAssignments overspillAssignments,
         IvfSegmentConfig fieldWritingContext
     ) throws IOException {
+        FloatVectorValues floatVectorValues = (FloatVectorValues) vectorValues;
         final IvfSegmentConfig segmentConfig = requireSegmentConfig(fieldWritingContext);
         final QuantEncoding effectiveQuantEncoding = segmentConfig.quantEncoding();
         // first, quantize all the vectors into a temporary file

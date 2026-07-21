@@ -215,7 +215,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
      *
      * @param fieldInfo            field info
      * @param centroidSupplier     the computed centroids and centroid index
-     * @param floatVectorValues    the raw vectors
+     * @param vectorValues         the raw vectors (float or byte)
      * @param postingsOutput       clusters file output
      * @param fileOffset           base offset in {@code postingsOutput} that the returned offsets and lengths are relative to
      * @param mergeState           merge information
@@ -227,7 +227,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
     public abstract CentroidOffsetAndLength buildAndWritePostingsLists(
         FieldInfo fieldInfo,
         CentroidSupplier centroidSupplier,
-        FloatVectorValues floatVectorValues,
+        ClusteringVectorValues<?> vectorValues,
         IndexOutput postingsOutput,
         long fileOffset,
         MergeState mergeState,
@@ -806,6 +806,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                     final CentroidSupplier centroidSupplier;
                     final CentroidOffsetAndLength centroidOffsetAndLength;
 
+                    // Create centroid supplier (encoding-specific)
                     if (byteCentroidsWritten && byteVectorValues != null) {
                         // Read byte centroids from temp into on-heap byte[][] (centroids are small)
                         int dim = fieldInfo.getVectorDimension();
@@ -814,75 +815,39 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                             centroidsInput.readBytes(byteCentroidArrays[i], 0, dim);
                         }
                         centroidSupplier = createCentroidSupplier(fieldInfo, byteCentroidArrays, assignments.globalCentroid());
-
-                        // write initial centroid index (we might need to read it later for overspilling)
-                        centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
-                        CI centroidIndex = writeCentroidIndex(centroidSupplier, assignments.assignments(), ivfCentroids);
-
-                        // write posting lists
-                        postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
-                        centroidOffsetAndLength = buildAndWritePostingsLists(
-                            fieldInfo,
-                            centroidSupplier,
-                            byteVectorValues,
-                            ivfClusters,
-                            postingListOffset,
-                            assignments.assignments(),
-                            assignments.overspillAssignments(),
-                            ivfSegmentConfig
-                        );
-                        postingListLength = ivfClusters.getFilePointer() - postingListOffset;
-
-                        // write the rest of the centroid data now we know the size of the postings
-                        writeCentroidData(
-                            fieldInfo,
-                            centroidSupplier,
-                            assignments.globalCentroid(),
-                            centroidOffsetAndLength,
-                            centroidIndex,
-                            ivfCentroids
-                        );
-                        centroidLength = ivfCentroids.getFilePointer() - centroidOffset;
                     } else {
                         centroidSupplier = createCentroidSupplier(centroidsInput, assignments, fieldInfo);
-
-                        // write initial centroid index (we might need to read it later for overspilling)
-                        centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
-                        CI centroidIndex = writeCentroidIndex(centroidSupplier, assignments.assignments(), ivfCentroids);
-
-                        // For byte fields with float centroids (e.g. flat threshold), widen byte vectors to float
-                        final FloatVectorValues postingsVectorValues;
-                        if (floatVectorValues != null) {
-                            postingsVectorValues = floatVectorValues;
-                        } else {
-                            postingsVectorValues = asFloatVectorValues(fieldInfo, vectorValues);
-                        }
-
-                        // write posting lists
-                        postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
-                        centroidOffsetAndLength = buildAndWritePostingsLists(
-                            fieldInfo,
-                            centroidSupplier,
-                            postingsVectorValues,
-                            ivfClusters,
-                            postingListOffset,
-                            mergeState,
-                            assignments.assignments(),
-                            assignments.overspillAssignments(),
-                            ivfSegmentConfig
-                        );
-                        postingListLength = ivfClusters.getFilePointer() - postingListOffset;
-
-                        writeCentroidData(
-                            fieldInfo,
-                            centroidSupplier,
-                            assignments.globalCentroid(),
-                            centroidOffsetAndLength,
-                            centroidIndex,
-                            ivfCentroids
-                        );
-                        centroidLength = ivfCentroids.getFilePointer() - centroidOffset;
                     }
+
+                    // write initial centroid index (we might need to read it later for overspilling)
+                    centroidOffset = ivfCentroids.alignFilePointer(Float.BYTES);
+                    CI centroidIndex = writeCentroidIndex(centroidSupplier, assignments.assignments(), ivfCentroids);
+
+                    // write posting lists
+                    postingListOffset = ivfClusters.alignFilePointer(Float.BYTES);
+                    centroidOffsetAndLength = buildAndWritePostingsLists(
+                        fieldInfo,
+                        centroidSupplier,
+                        vectorValues,
+                        ivfClusters,
+                        postingListOffset,
+                        mergeState,
+                        assignments.assignments(),
+                        assignments.overspillAssignments(),
+                        ivfSegmentConfig
+                    );
+                    postingListLength = ivfClusters.getFilePointer() - postingListOffset;
+
+                    // write the rest of the centroid data now we know the size of the postings
+                    writeCentroidData(
+                        fieldInfo,
+                        centroidSupplier,
+                        assignments.globalCentroid(),
+                        centroidOffsetAndLength,
+                        centroidIndex,
+                        ivfCentroids
+                    );
+                    centroidLength = ivfCentroids.getFilePointer() - centroidOffset;
 
                     long preconditionerOffset = ivfCentroids.getFilePointer();
                     writePreconditioner(preconditioner, ivfCentroids);
