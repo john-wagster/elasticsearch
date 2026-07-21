@@ -408,12 +408,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                         case EUCLIDEAN -> {
                             if (isByte) {
                                 byte[] vector = ((ByteVectorValues) vectorValues).vectorValue(i);
-                                float dist = 0;
-                                for (int d = 0; d < vector.length; d++) {
-                                    float diff = vector[d] - parentCentroid[d];
-                                    dist += diff * diff;
-                                }
-                                yield dist;
+                                yield ESVectorUtil.squareDistance(vector, parentCentroid);
                             } else {
                                 yield ESVectorUtil.squareDistance(((FloatVectorValues) vectorValues).vectorValue(i), parentCentroid);
                             }
@@ -449,12 +444,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                             case EUCLIDEAN -> {
                                 if (isByte) {
                                     byte[] vector = ((ByteVectorValues) vectorValues).vectorValue(i);
-                                    float dist = 0;
-                                    for (int d = 0; d < vector.length; d++) {
-                                        float diff = vector[d] - overspillParentCentroid[d];
-                                        dist += diff * diff;
-                                    }
-                                    yield dist;
+                                    yield ESVectorUtil.squareDistance(vector, overspillParentCentroid);
                                 } else {
                                     yield ESVectorUtil.squareDistance(
                                         ((FloatVectorValues) vectorValues).vectorValue(i),
@@ -1365,14 +1355,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             corrections = quantizer.scalarQuantize(vector, floatVectorScratch, quantizedVectorScratch, encoding.bits(), currentCentroid);
             if (currentParentCentroid != null) {
                 float additionalCorrection = switch (similarityFunction) {
-                    case EUCLIDEAN -> {
-                        float dist = 0;
-                        for (int i = 0; i < vector.length; i++) {
-                            float diff = vector[i] - currentParentCentroid[i];
-                            dist += diff * diff;
-                        }
-                        yield dist;
-                    }
+                    case EUCLIDEAN -> ESVectorUtil.squareDistance(vector, currentParentCentroid);
                     case DOT_PRODUCT, MAXIMUM_INNER_PRODUCT -> ESVectorUtil.dotProduct(floatVectorScratch, currentParentCentroid);
                     default -> throw new AssertionError(similarityFunction);
                 };

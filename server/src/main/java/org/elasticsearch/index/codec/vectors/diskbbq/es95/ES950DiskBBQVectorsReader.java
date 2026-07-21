@@ -22,7 +22,6 @@ import org.apache.lucene.search.KnnCollector;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.LongValues;
-import org.apache.lucene.util.VectorUtil;
 import org.apache.lucene.util.packed.DirectReader;
 import org.apache.lucene.util.packed.DirectWriter;
 import org.elasticsearch.index.codec.vectors.GenericFlatVectorReaders;
@@ -143,17 +142,9 @@ public class ES950DiskBBQVectorsReader extends IVFVectorsReader<ES950DiskBBQVect
         // Extract float target for FlatCentroidIndex (byte queries are converted at the IVF search entry point)
         float[] targetQuery = switch (queryTarget) {
             case QueryTarget.FloatQuery fq -> fq.vector();
-            case QueryTarget.ByteQuery bq -> {
-                float[] widened = new float[bq.vector().length];
-                for (int i = 0; i < bq.vector().length; i++) {
-                    widened[i] = bq.vector()[i];
-                }
-                // COSINE requires unit-normalized queries for the scalar quantizer
-                if (fieldInfo.getVectorSimilarityFunction() == VectorSimilarityFunction.COSINE) {
-                    VectorUtil.l2normalize(widened);
-                }
-                yield widened;
-            }
+            case QueryTarget.ByteQuery bq -> throw new UnsupportedOperationException(
+                "byte vector search not supported by this legacy format"
+            );
         };
         ES950DiskBBQVectorsReader.NextFieldEntry fieldEntry = fields.get(fieldInfo.number);
         var iterator = new FlatCentroidIndex(
@@ -401,13 +392,9 @@ public class ES950DiskBBQVectorsReader extends IVFVectorsReader<ES950DiskBBQVect
         // Extract float target for QueryQuantizer (byte queries are widened at the search entry point)
         float[] target = switch (queryTarget) {
             case QueryTarget.FloatQuery fq -> fq.vector();
-            case QueryTarget.ByteQuery bq -> {
-                float[] widened = new float[bq.vector().length];
-                for (int i = 0; i < bq.vector().length; i++) {
-                    widened[i] = bq.vector()[i];
-                }
-                yield widened;
-            }
+            case QueryTarget.ByteQuery bq -> throw new UnsupportedOperationException(
+                "byte vector search not supported by this legacy format"
+            );
         };
         if (entry.numSlices > 0) {
             final int bitsRequired = DirectWriter.bitsRequired(entry.maxSliceSize);

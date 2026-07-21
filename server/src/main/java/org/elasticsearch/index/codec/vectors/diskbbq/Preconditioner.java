@@ -49,16 +49,6 @@ public class Preconditioner {
     }
 
     /**
-     * Applies the preconditioner rotation to a byte vector, converting each byte value [-128, 127]
-     * to the corresponding float before rotation. The result is written to {@code out}.
-     * <p>
-     * This avoids the need for a separate byte-to-float conversion step before preconditioning,
-     * enabling byte vectors to be stored compactly (1 byte/dim) and lazily preconditioned on read.
-     *
-     * @param vector the byte vector to transform
-     * @param out the output float array for the transformed vector
-     */
-    /**
      * Applies the preconditioner rotation to a byte vector, producing a rotated byte vector.
      * The rotation is performed in float precision internally (using the provided scratch buffer),
      * then the result is rounded and clamped back to byte range [-128, 127].

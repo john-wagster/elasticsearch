@@ -435,6 +435,37 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         }
     }
 
+    /**
+     * Computes doc IDs and ordinal mapping for vectors from a flush writer, handling dense, sparse, and sorted cases.
+     */
+    private record FlushVectorOrdering(int[] docIds, int[] ordMap) {
+        static FlushVectorOrdering compute(FlatFieldVectorsWriter<?> fieldVectorsWriter, int maxDoc, int vectorCount, Sorter.DocMap sortMap)
+            throws IOException {
+            if (vectorCount == maxDoc && sortMap == null) {
+                return new FlushVectorOrdering(null, null);
+            } else if (sortMap == null) {
+                final DocIdSetIterator iterator = fieldVectorsWriter.getDocsWithFieldSet().iterator();
+                final int[] docIds = new int[vectorCount];
+                for (int i = 0; i < docIds.length; i++) {
+                    docIds[i] = iterator.nextDoc();
+                }
+                assert iterator.nextDoc() == NO_MORE_DOCS;
+                return new FlushVectorOrdering(docIds, null);
+            } else {
+                DocsWithFieldSet newDocsWithField = new DocsWithFieldSet();
+                final int[] ordMap = new int[fieldVectorsWriter.getDocsWithFieldSet().cardinality()];
+                KnnVectorsWriter.mapOldOrdToNewOrd(fieldVectorsWriter.getDocsWithFieldSet(), sortMap, null, ordMap, newDocsWithField);
+                final DocIdSetIterator iterator = newDocsWithField.iterator();
+                final int[] docIds = new int[vectorCount];
+                for (int i = 0; i < docIds.length; i++) {
+                    docIds[i] = iterator.nextDoc();
+                }
+                assert iterator.nextDoc() == NO_MORE_DOCS;
+                return new FlushVectorOrdering(docIds, ordMap);
+            }
+        }
+    }
+
     private static KMeansFloatVectorValues getKMeansFloatVectorValues(
         FieldInfo fieldInfo,
         FlatFieldVectorsWriter<float[]> fieldVectorsWriter,
@@ -442,40 +473,24 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         Sorter.DocMap sortMap
     ) throws IOException {
         List<float[]> vectors = fieldVectorsWriter.getVectors();
-        if (vectors.size() == maxDoc && sortMap == null) {
-            return KMeansFloatVectorValues.build(vectors, null, fieldInfo.getVectorDimension());
-        } else if (sortMap == null) {
-            final DocIdSetIterator iterator = fieldVectorsWriter.getDocsWithFieldSet().iterator();
-            final int[] docIds = new int[vectors.size()];
-            for (int i = 0; i < docIds.length; i++) {
-                docIds[i] = iterator.nextDoc();
-            }
-            assert iterator.nextDoc() == NO_MORE_DOCS;
-            return KMeansFloatVectorValues.build(vectors, docIds, fieldInfo.getVectorDimension());
-        } else {
-            DocsWithFieldSet newDocsWithField = new DocsWithFieldSet();
-            final int[] ordMap = new int[fieldVectorsWriter.getDocsWithFieldSet().cardinality()]; // new ord to old ord
-            KnnVectorsWriter.mapOldOrdToNewOrd(fieldVectorsWriter.getDocsWithFieldSet(), sortMap, null, ordMap, newDocsWithField);
-            final DocIdSetIterator iterator = newDocsWithField.iterator();
-            final int[] docIds = new int[vectors.size()];
-            for (int i = 0; i < docIds.length; i++) {
-                docIds[i] = iterator.nextDoc();
-            }
-            assert iterator.nextDoc() == NO_MORE_DOCS;
-            List<float[]> orderedVectors = new AbstractList<>() {
+        FlushVectorOrdering ordering = FlushVectorOrdering.compute(fieldVectorsWriter, maxDoc, vectors.size(), sortMap);
+        if (ordering.ordMap() != null) {
+            final int[] ordMap = ordering.ordMap();
+            vectors = new AbstractList<>() {
+                private final List<float[]> delegate = fieldVectorsWriter.getVectors();
 
                 @Override
                 public int size() {
-                    return vectors.size();
+                    return delegate.size();
                 }
 
                 @Override
                 public float[] get(int index) {
-                    return vectors.get(ordMap[index]);
+                    return delegate.get(ordMap[index]);
                 }
             };
-            return KMeansFloatVectorValues.build(orderedVectors, docIds, fieldInfo.getVectorDimension());
         }
+        return KMeansFloatVectorValues.build(vectors, ordering.docIds(), fieldInfo.getVectorDimension());
     }
 
     private static KMeansByteVectorValues getKMeansByteVectorValues(
@@ -485,39 +500,24 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         Sorter.DocMap sortMap
     ) throws IOException {
         List<byte[]> vectors = fieldVectorsWriter.getVectors();
-        if (vectors.size() == maxDoc && sortMap == null) {
-            return KMeansByteVectorValues.build(vectors, null, fieldInfo.getVectorDimension());
-        } else if (sortMap == null) {
-            final DocIdSetIterator iterator = fieldVectorsWriter.getDocsWithFieldSet().iterator();
-            final int[] docIds = new int[vectors.size()];
-            for (int i = 0; i < docIds.length; i++) {
-                docIds[i] = iterator.nextDoc();
-            }
-            assert iterator.nextDoc() == NO_MORE_DOCS;
-            return KMeansByteVectorValues.build(vectors, docIds, fieldInfo.getVectorDimension());
-        } else {
-            DocsWithFieldSet newDocsWithField = new DocsWithFieldSet();
-            final int[] ordMap = new int[fieldVectorsWriter.getDocsWithFieldSet().cardinality()];
-            KnnVectorsWriter.mapOldOrdToNewOrd(fieldVectorsWriter.getDocsWithFieldSet(), sortMap, null, ordMap, newDocsWithField);
-            final DocIdSetIterator iterator = newDocsWithField.iterator();
-            final int[] docIds = new int[vectors.size()];
-            for (int i = 0; i < docIds.length; i++) {
-                docIds[i] = iterator.nextDoc();
-            }
-            assert iterator.nextDoc() == NO_MORE_DOCS;
-            List<byte[]> orderedVectors = new AbstractList<>() {
+        FlushVectorOrdering ordering = FlushVectorOrdering.compute(fieldVectorsWriter, maxDoc, vectors.size(), sortMap);
+        if (ordering.ordMap() != null) {
+            final int[] ordMap = ordering.ordMap();
+            vectors = new AbstractList<>() {
+                private final List<byte[]> delegate = fieldVectorsWriter.getVectors();
+
                 @Override
                 public int size() {
-                    return vectors.size();
+                    return delegate.size();
                 }
 
                 @Override
                 public byte[] get(int index) {
-                    return vectors.get(ordMap[index]);
+                    return delegate.get(ordMap[index]);
                 }
             };
-            return KMeansByteVectorValues.build(orderedVectors, docIds, fieldInfo.getVectorDimension());
         }
+        return KMeansByteVectorValues.build(vectors, ordering.docIds(), fieldInfo.getVectorDimension());
     }
 
     /**
@@ -566,6 +566,10 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
      * merge path when float clustering is selected for byte fields.
      * <p>
      * Not used by legacy codecs — they skip byte IVF indexing entirely.
+     * <p>
+     * This method materializes all vectors on the heap. In practice, it is only called in bounded contexts:
+     * during flush it is bounded by {@code flatVectorThreshold} (small vector count), and during merge
+     * it is a no-op pass-through (the input is already {@link KMeansFloatVectorValues} for float fields).
      */
     protected static KMeansFloatVectorValues asFloatVectorValues(FieldInfo fieldInfo, ClusteringVectorValues<?> vectorValues)
         throws IOException {

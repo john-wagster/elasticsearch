@@ -148,6 +148,22 @@ public class ESVectorUtil {
         return IMPL.squareDistance(a, b);
     }
 
+    /**
+     * Computes the squared Euclidean distance between a byte vector and a float vector.
+     * Each byte element is implicitly widened to float for the computation.
+     */
+    public static float squareDistance(byte[] a, float[] b) {
+        if (a.length != b.length) {
+            throw new IllegalArgumentException("vector dimensions incompatible: " + a.length + "!= " + b.length);
+        }
+        float dist = 0;
+        for (int i = 0; i < a.length; i++) {
+            float diff = a[i] - b[i];
+            dist += diff * diff;
+        }
+        return dist;
+    }
+
     public static float squareDistance(float[] a, float[] b, int offset, int length) {
         if (a.length != b.length) {
             throw new IllegalArgumentException("vector dimensions incompatible: " + a.length + "!= " + b.length);
