@@ -52,17 +52,20 @@ import static org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader.SIMILA
 public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> extends KnnVectorsReader {
 
     /**
-     * Represents the query vector target for IVF search, abstracting over byte[] and float[] representations.
+     * Sealed query target for IVF search dispatch. Allows the search path to handle
+     * both float and byte queries through pattern matching.
      */
     public sealed interface QueryTarget {
         int dimension();
 
+        /** A byte vector query target. */
         record ByteQuery(byte[] vector) implements QueryTarget {
             public int dimension() {
                 return vector.length;
             }
         }
 
+        /** A float vector query target. */
         record FloatQuery(float[] vector) implements QueryTarget {
             public int dimension() {
                 return vector.length;

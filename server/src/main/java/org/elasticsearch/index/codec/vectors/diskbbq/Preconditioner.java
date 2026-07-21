@@ -64,6 +64,13 @@ public class Preconditioner {
         }
     }
 
+    /**
+     * Applies the preconditioner rotation to a byte vector, producing a float result.
+     * Each byte element is implicitly widened to float during the matrix-vector multiply.
+     *
+     * @param vector the input byte vector
+     * @param out    the output float vector (same length as input)
+     */
     public void applyTransform(byte[] vector, float[] out) {
         assert vector != null;
         assert vector.length == blockDim * (blocks.length - 1) + (blocks[blocks.length - 1].length);

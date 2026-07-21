@@ -203,6 +203,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             maxSliceSize = input.readVInt();
         }
         float rescoreOversample = Float.intBitsToFloat(input.readInt());
+        // ESNext format extension: byte centroid flag
         boolean byteCentroids = input.readByte() == 1;
         return new NextFieldEntry(
             rawVectorFormat,

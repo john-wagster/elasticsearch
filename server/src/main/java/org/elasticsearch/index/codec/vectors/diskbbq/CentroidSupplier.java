@@ -59,6 +59,13 @@ public interface CentroidSupplier {
         return fromArray(new float[0][dims], CentroidIndex.NO_INDEX, dims);
     }
 
+    /**
+     * Creates a float-backed centroid supplier.
+     *
+     * @param centroids     the float centroid arrays
+     * @param centroidIndex the centroid index structure
+     * @param dims          the vector dimension
+     */
     static CentroidSupplier fromArray(float[][] centroids, CentroidIndex centroidIndex, int dims) {
         return new CentroidSupplier() {
             @Override
@@ -83,6 +90,15 @@ public interface CentroidSupplier {
         };
     }
 
+    /**
+     * Creates a byte-backed centroid supplier. The {@link #centroid(int)} method widens byte
+     * centroids to float on demand using a reusable scratch buffer. The {@link #byteCentroid(int)}
+     * method returns the raw byte centroid.
+     *
+     * @param byteCentroids the byte centroid arrays
+     * @param centroidIdx   the centroid index structure
+     * @param dims          the vector dimension
+     */
     static CentroidSupplier fromByteArray(byte[][] byteCentroids, CentroidIndex centroidIdx, int dims) {
         return new CentroidSupplier() {
             // Single reusable scratch buffer for on-demand byte→float widening.

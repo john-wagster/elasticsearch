@@ -526,7 +526,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                 true
             );
             // write the posting lists
-            final int[] docIds = new int[maxPostingListSize];
+            final int[] docIdsScratch = new int[maxPostingListSize];
             final int[] docDeltas = new int[maxPostingListSize];
             final int[] clusterOrds = new int[maxPostingListSize];
             DocIdsWriter idsWriter = new DocIdsWriter();
@@ -553,14 +553,16 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                 int size = cluster.length;
                 postingsOutput.writeVInt(size);
                 for (int j = 0; j < size; j++) {
-                    docIds[j] = vectorValues.ordToDoc(cluster[j]);
+                    docIdsScratch[j] = vectorValues.ordToDoc(cluster[j]);
                     clusterOrds[j] = j;
                 }
                 // sort cluster.buffer by docIds values, this way cluster ordinals are sorted by docIds
-                new IntSorter(clusterOrds, i -> docIds[i]).sort(0, size);
+                new IntSorter(clusterOrds, i -> docIdsScratch[i]).sort(0, size);
                 // encode doc deltas
                 for (int j = 0; j < size; j++) {
-                    docDeltas[j] = j == 0 ? docIds[clusterOrds[j]] : docIds[clusterOrds[j]] - docIds[clusterOrds[j - 1]];
+                    docDeltas[j] = j == 0
+                        ? docIdsScratch[clusterOrds[j]]
+                        : docIdsScratch[clusterOrds[j]] - docIdsScratch[clusterOrds[j - 1]];
                 }
                 byte encoding = idsWriter.calculateBlockEncoding(i -> docDeltas[i], size, BULK_SIZE);
                 postingsOutput.writeByte(encoding);
@@ -744,6 +746,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             }
         }
         metaOutput.writeInt(Float.floatToIntBits(segmentConfig.rescoreOversample()));
+        // ESNext format extension: byte centroid flag — indicates whether raw centroids
+        // are stored as 1 byte/dim (byte fields) or 4 bytes/dim (float fields).
         metaOutput.writeByte(byteCentroids ? (byte) 1 : (byte) 0);
     }
 
@@ -1216,6 +1220,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         }
     }
 
+    /**
+     * On-heap quantized vector values for float-encoded fields. Quantizes float vectors against
+     * float centroids using the {@link OptimizedScalarQuantizer}.
+     */
     static class OnHeapQuantizedVectors implements QuantizedVectorValues {
         private final FloatVectorValues vectorValues;
         private final OptimizedScalarQuantizer quantizer;
@@ -1297,6 +1305,11 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         }
     }
 
+    /**
+     * On-heap quantized vector values for byte-encoded fields. Quantizes byte vectors against
+     * byte centroids using the native byte {@link OptimizedScalarQuantizer} overload, avoiding
+     * byte-to-float widening during quantization.
+     */
     static class OnHeapQuantizedByteVectors implements QuantizedVectorValues {
         private final ByteVectorValues vectorValues;
         private final OptimizedScalarQuantizer quantizer;
