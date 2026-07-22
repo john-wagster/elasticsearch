@@ -1343,7 +1343,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             this.currentParentCentroid = null;
         }
 
-        void reset(byte[] centroid, float[] currentParentCentroid, int count, IntToIntFunction ordTransformer) {
+        private void reset(byte[] centroid, float[] currentParentCentroid, int count, IntToIntFunction ordTransformer) {
             this.currentCentroid = centroid;
             this.ordTransformer = ordTransformer;
             this.currOrd = -1;

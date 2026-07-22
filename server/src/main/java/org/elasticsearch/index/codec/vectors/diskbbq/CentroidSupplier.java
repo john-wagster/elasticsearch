@@ -96,10 +96,10 @@ public interface CentroidSupplier {
      * method returns the raw byte centroid.
      *
      * @param byteCentroids the byte centroid arrays
-     * @param centroidIdx   the centroid index structure
+     * @param centroidIndex   the centroid index structure
      * @param dims          the vector dimension
      */
-    static CentroidSupplier fromByteArray(byte[][] byteCentroids, CentroidIndex centroidIdx, int dims) {
+    static CentroidSupplier fromByteArray(byte[][] byteCentroids, CentroidIndex centroidIndex, int dims) {
         return new CentroidSupplier() {
             // Single reusable scratch buffer for on-demand byte→float widening.
             // The returned float[] is only valid until the next call to centroid().
@@ -126,7 +126,7 @@ public interface CentroidSupplier {
 
             @Override
             public CentroidIndex centroidIndex() {
-                return centroidIdx;
+                return centroidIndex;
             }
 
             @Override
