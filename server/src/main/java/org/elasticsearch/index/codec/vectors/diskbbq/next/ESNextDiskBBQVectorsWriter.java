@@ -290,8 +290,6 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         final int[] docDeltas = new int[maxPostingListSize];
         final int[] clusterOrds = new int[maxPostingListSize];
         DocIdsWriter idsWriter = new DocIdsWriter();
-        // Scratch for byte centroid → float widening (only needed for byte path squareDistance)
-        float[] centroidFloat = isByte ? new float[fieldInfo.getVectorDimension()] : null;
 
         for (int c = 0; c < centroidSupplier.size(); c++) {
             float[] parentCentroid = centroidClusters.getCentroid(c);
@@ -301,10 +299,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
 
             if (isByte) {
                 byte[] centroid = centroidSupplier.byteCentroid(c);
-                for (int d = 0; d < centroid.length; d++) {
-                    centroidFloat[d] = centroid[d];
-                }
-                postingsOutput.writeInt(Float.floatToIntBits(ESVectorUtil.squareDistance(centroidFloat, parentCentroid)));
+                postingsOutput.writeInt(Float.floatToIntBits(ESVectorUtil.squareDistance(centroid, parentCentroid)));
             } else {
                 float[] centroid = centroidSupplier.centroid(c);
                 postingsOutput.writeInt(Float.floatToIntBits(ESVectorUtil.squareDistance(centroid, parentCentroid)));
@@ -530,8 +525,6 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             final int[] docDeltas = new int[maxPostingListSize];
             final int[] clusterOrds = new int[maxPostingListSize];
             DocIdsWriter idsWriter = new DocIdsWriter();
-            // Scratch for byte centroid → float widening (only needed for byte path squareDistance)
-            float[] centroidFloat = vectorValues instanceof ByteVectorValues ? new float[fieldInfo.getVectorDimension()] : null;
             for (int c = 0; c < centroidSupplier.size(); c++) {
                 int[] cluster = assignmentsByCluster[c];
                 int[] vectorCentroidIdx = overspillVectorIdx[c];
@@ -539,11 +532,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                 offsets.add(offset);
                 if (vectorValues instanceof ByteVectorValues) {
                     byte[] centroid = centroidSupplier.byteCentroid(c);
-                    for (int d = 0; d < centroid.length; d++) {
-                        centroidFloat[d] = centroid[d];
-                    }
                     postingsOutput.writeInt(
-                        Float.floatToIntBits(ESVectorUtil.squareDistance(centroidFloat, centroidClusters.getCentroid(c)))
+                        Float.floatToIntBits(ESVectorUtil.squareDistance(centroid, centroidClusters.getCentroid(c)))
                     );
                 } else {
                     float[] centroid = centroidSupplier.centroid(c);
