@@ -88,8 +88,13 @@ public class FlatCentroidIndex {
         bulkSize = fieldEntry.getBulkSize();
         OptimizedScalarQuantizer scalarQuantizer = new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction());
         int[] scratch = new int[targetQuery.length];
-        float[] globalCentroid = fieldEntry.globalCentroid();
-        queryParams = scalarQuantizer.scalarQuantize(targetQuery, new float[targetQuery.length], scratch, (byte) 7, globalCentroid);
+        queryParams = scalarQuantizer.scalarQuantize(
+            targetQuery,
+            new float[targetQuery.length],
+            scratch,
+            (byte) 7,
+            fieldEntry.globalCentroid()
+        );
         quantized = new byte[targetQuery.length];
         for (int i = 0; i < quantized.length; i++) {
             quantized[i] = (byte) scratch[i];

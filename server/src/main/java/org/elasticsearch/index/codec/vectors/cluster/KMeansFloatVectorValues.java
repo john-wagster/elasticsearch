@@ -100,8 +100,7 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
 
     @Override
     public ClusteringFloatVectorValues copy() throws IOException {
-        VectorSupplier copiedVectors = vectors.copy();
-        return new KMeansFloatVectorValues(copiedVectors, docs != null ? docs.copy() : null, numVectors);
+        return new KMeansFloatVectorValues(vectors.copy(), docs != null ? docs.copy() : null, numVectors);
     }
 
     @Override

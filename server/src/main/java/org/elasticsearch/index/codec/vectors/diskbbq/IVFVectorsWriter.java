@@ -338,7 +338,6 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             if (isByte) {
                 @SuppressWarnings("unchecked")
                 final FlatFieldVectorsWriter<byte[]> byteWriter = (FlatFieldVectorsWriter<byte[]>) fieldWriter.delegate;
-                // Precondition byte vectors in-place before building KMeansByteVectorValues (matches float pattern)
                 if (preconditioner != null) {
                     preconditioner.preconditionVectorsInPlace(byteWriter.getVectors(), VectorEncoding.BYTE);
                 }
