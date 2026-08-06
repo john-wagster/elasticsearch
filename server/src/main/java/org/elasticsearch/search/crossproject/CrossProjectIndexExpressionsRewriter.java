@@ -12,7 +12,6 @@ package org.elasticsearch.search.crossproject;
 import org.elasticsearch.TransportVersion;
 import org.elasticsearch.cluster.metadata.ClusterNameExpressionResolver;
 import org.elasticsearch.cluster.metadata.Metadata;
-import org.elasticsearch.common.regex.Regex;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.indices.InvalidIndexNameException;
 import org.elasticsearch.logging.LogManager;
@@ -58,6 +57,13 @@ public class CrossProjectIndexExpressionsRewriter {
     ) {
         ensureProjectsAvailable(originProjectAlias, allProjectAliases, projectRouting);
 
+        if (indexExpression.contains(":::")) {
+            throw new InvalidIndexNameException(
+                indexExpression,
+                "too many consecutive ':' (use ':' to qualify a project and '::' for an index selector)"
+            );
+        }
+
         final boolean isQualified = RemoteClusterAware.isRemoteIndexName(indexExpression);
         final IndexRewriteResult rewrittenExpression;
         if (isQualified) {
@@ -88,8 +94,8 @@ public class CrossProjectIndexExpressionsRewriter {
             return;
         }
 
-        String[] splitResource = RemoteClusterAware.splitIndexName(indexExpression);
-        String requestedProjectAlias = splitResource[0];
+        var splitResource = RemoteClusterAware.splitIndexName(indexExpression);
+        String requestedProjectAlias = splitResource.clusterAlias();
         assert requestedProjectAlias != null : "Expected a project alias for a qualified resource but was null";
         if (isExclusionExpression(requestedProjectAlias)) {
             requestedProjectAlias = requestedProjectAlias.substring(1);
@@ -137,8 +143,8 @@ public class CrossProjectIndexExpressionsRewriter {
         Set<String> allProjectAliases,
         @Nullable String projectRouting
     ) {
-        String[] splitResource = CrossProjectIndexResolutionValidator.splitQualifiedResource(resource);
-        String requestedProjectAlias = splitResource[0];
+        var splitResource = RemoteClusterAware.splitIndexName(resource);
+        String requestedProjectAlias = splitResource.clusterAlias();
         assert requestedProjectAlias != null : "Expected a project alias for a qualified resource but was null";
         boolean isExclusion = false;
         if (isExclusionExpression(requestedProjectAlias)) {
@@ -147,7 +153,7 @@ public class CrossProjectIndexExpressionsRewriter {
             isExclusion = true;
         }
 
-        final String indexExpression = splitResource[1];
+        final String indexExpression = splitResource.indexExpression();
         if (RemoteClusterAware.isRemoteIndexName(indexExpression)) {
             throw new InvalidIndexNameException(resource, "index expression cannot contain project qualifiers (no cross-project chaining)");
         }
@@ -168,8 +174,6 @@ public class CrossProjectIndexExpressionsRewriter {
         final Set<String> resourcesMatchingLinkedProjectAliases = new LinkedHashSet<>();
         final Set<String> includedProjects = new LinkedHashSet<>();
         final Set<String> excludedProjects = new LinkedHashSet<>();
-        // TODO: Rewrite supports exclusion such as -project:index but it is still rejected by RemoteClusterAware#groupClusterIndices
-        // We could consider supporting it all the way through, see also ES-13767
         for (String project : allProjectsMatchingAlias) {
             if (project.equals(originProjectAlias)) {
                 localExpression = isExclusion ? EXCLUSION_PREFIX + indexExpression : indexExpression;
@@ -239,25 +243,6 @@ public class CrossProjectIndexExpressionsRewriter {
     static boolean isExclusionExpression(String expression) {
         assert expression != null && expression.isEmpty() == false : "expression must be a non-empty string";
         return expression.charAt(0) == EXCLUSION_PREFIX;
-    }
-
-    /**
-     * Returns {@code true} if {@code pattern} fully excludes the origin project via a project-wildcard exclusion of the shape
-     * {@code -<alias>:*}, where {@code <alias>} is either the special {@code _origin} alias or a {@link Regex#simpleMatch simple-match}
-     * against {@code originProjectAlias}.
-     */
-    public static boolean isOriginProjectWildcardExclusion(String pattern, String originProjectAlias) {
-        assert originProjectAlias != null : "originProjectAlias must not be null";
-        if (pattern.isEmpty() || pattern.charAt(0) != EXCLUSION_PREFIX) {
-            return false;
-        }
-        String[] split = RemoteClusterAware.splitIndexName(pattern.substring(1));
-        String alias = split[0];
-        String index = split[1];
-        if (alias == null || "*".equals(index) == false) {
-            return false;
-        }
-        return ProjectRoutingResolver.ORIGIN.equals(alias) || Regex.simpleMatch(alias, originProjectAlias);
     }
 
     public record IndexRewriteResult(

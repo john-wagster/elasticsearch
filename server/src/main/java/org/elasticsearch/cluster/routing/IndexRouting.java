@@ -30,6 +30,7 @@ import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.IndexVersions;
+import org.elasticsearch.index.SliceIndexing;
 import org.elasticsearch.index.mapper.TimeSeriesRoutingHashFieldMapper;
 import org.elasticsearch.index.mapper.TsidExtractingIdFieldMapper;
 import org.elasticsearch.index.mapper.Uid;
@@ -68,31 +69,46 @@ public abstract class IndexRouting {
             routingFunction = RoutingFunction.legacyRoutingNumberOfShards(metadata.getRoutingNumShards(), metadata.getRoutingFactor());
         }
 
-        if (metadata.getIndexMode() == IndexMode.TIME_SERIES
+        return create(metadata, routingFunction, metadata.getReshardingMetadata());
+    }
+
+    public static IndexRouting reshardingCustom(
+        IndexMetadata metadata,
+        RoutingFunction routingFunction,
+        IndexReshardingMetadata reshardingMetadata
+    ) {
+        return create(metadata, routingFunction, reshardingMetadata);
+    }
+
+    private static IndexRouting create(
+        IndexMetadata metadata,
+        RoutingFunction routingFunction,
+        IndexReshardingMetadata reshardingMetadata
+    ) {
+        if (IndexMode.isTsdb(metadata.getIndexMode())
             && metadata.getTimeSeriesDimensions().isEmpty() == false
             && metadata.getCreationVersion().onOrAfter(IndexVersions.TSID_CREATED_DURING_ROUTING)) {
-            return new ExtractFromSource.ForIndexDimensions(metadata, routingFunction);
+            return new ExtractFromSource.ForIndexDimensions(metadata, routingFunction, reshardingMetadata);
         }
         if (metadata.getRoutingPaths().isEmpty() == false) {
-            return new ExtractFromSource.ForRoutingPath(metadata, routingFunction);
+            return new ExtractFromSource.ForRoutingPath(metadata, routingFunction, reshardingMetadata);
         }
         if (metadata.isRoutingPartitionedIndex()) {
-            return new Partitioned(metadata, routingFunction);
+            return new Partitioned(metadata, routingFunction, reshardingMetadata);
         }
-        return new Unpartitioned(metadata, routingFunction);
+        return new Unpartitioned(metadata, routingFunction, reshardingMetadata);
     }
 
     protected final String indexName;
     protected final IndexVersion creationVersion;
-    @Nullable
-    private final IndexReshardingMetadata indexReshardingMetadata;
-
     protected final RoutingFunction routingFunction;
+    @Nullable
+    private final IndexReshardingMetadata reshardingMetadata;
 
-    private IndexRouting(IndexMetadata metadata, RoutingFunction routingFunction) {
+    private IndexRouting(IndexMetadata metadata, RoutingFunction routingFunction, @Nullable IndexReshardingMetadata reshardingMetadata) {
         this.indexName = metadata.getIndex().getName();
         this.creationVersion = metadata.getCreationVersion();
-        this.indexReshardingMetadata = metadata.getReshardingMetadata();
+        this.reshardingMetadata = reshardingMetadata;
 
         this.routingFunction = routingFunction;
     }
@@ -200,10 +216,10 @@ public abstract class IndexRouting {
     }
 
     private int rerouteFromSplitTargetShard(int shardId, IndexReshardingState.Split.TargetShardState minimumRequiredState) {
-        assert indexReshardingMetadata == null || indexReshardingMetadata.isSplit() : "Index resharding state is not a split";
-        if (indexReshardingMetadata != null && indexReshardingMetadata.getSplit().isTargetShard(shardId)) {
-            if (indexReshardingMetadata.getSplit().targetStateAtLeast(shardId, minimumRequiredState) == false) {
-                return indexReshardingMetadata.getSplit().sourceShard(shardId);
+        assert reshardingMetadata == null || reshardingMetadata.isSplit() : "Index resharding state is not a split";
+        if (reshardingMetadata != null && reshardingMetadata.getSplit().isTargetShard(shardId)) {
+            if (reshardingMetadata.getSplit().targetStateAtLeast(shardId, minimumRequiredState) == false) {
+                return reshardingMetadata.getSplit().sourceShard(shardId);
             }
         }
         return shardId;
@@ -215,13 +231,13 @@ public abstract class IndexRouting {
         private final boolean sliceEnabled;
         private final String requiredRoutingParameterName;
 
-        IdAndRoutingOnly(IndexMetadata metadata, RoutingFunction routingFunction) {
-            super(metadata, routingFunction);
+        IdAndRoutingOnly(IndexMetadata metadata, RoutingFunction routingFunction, IndexReshardingMetadata reshardingMetadata) {
+            super(metadata, routingFunction, reshardingMetadata);
             MappingMetadata mapping = metadata.mapping();
             this.routingRequired = mapping == null ? false : mapping.routingRequired();
             this.indexMode = metadata.getIndexMode();
             this.sliceEnabled = IndexSettings.SLICE_ENABLED.get(metadata.getSettings());
-            this.requiredRoutingParameterName = sliceEnabled ? "_slice" : "routing";
+            this.requiredRoutingParameterName = sliceEnabled ? SliceIndexing.PARAM_NAME : "routing";
         }
 
         protected abstract int shardId(String id, @Nullable String routing);
@@ -318,8 +334,8 @@ public abstract class IndexRouting {
      * Strategy for indices that are not partitioned.
      */
     private static class Unpartitioned extends IdAndRoutingOnly {
-        Unpartitioned(IndexMetadata metadata, RoutingFunction routingFunction) {
-            super(metadata, routingFunction);
+        Unpartitioned(IndexMetadata metadata, RoutingFunction routingFunction, IndexReshardingMetadata reshardingMetadata) {
+            super(metadata, routingFunction, reshardingMetadata);
         }
 
         @Override
@@ -339,8 +355,8 @@ public abstract class IndexRouting {
     private static class Partitioned extends IdAndRoutingOnly {
         private final int routingPartitionSize;
 
-        Partitioned(IndexMetadata metadata, RoutingFunction routingFunction) {
-            super(metadata, routingFunction);
+        Partitioned(IndexMetadata metadata, RoutingFunction routingFunction, IndexReshardingMetadata reshardingMetadata) {
+            super(metadata, routingFunction, reshardingMetadata);
             this.routingPartitionSize = metadata.getRoutingPartitionSize();
         }
 
@@ -384,14 +400,19 @@ public abstract class IndexRouting {
             this.hash = h;
         }
 
-        ExtractFromSource(IndexMetadata metadata, RoutingFunction routingFunction, List<String> includePaths) {
-            super(metadata, routingFunction);
+        ExtractFromSource(
+            IndexMetadata metadata,
+            RoutingFunction routingFunction,
+            IndexReshardingMetadata reshardingMetadata,
+            List<String> includePaths
+        ) {
+            super(metadata, routingFunction, reshardingMetadata);
             if (metadata.isRoutingPartitionedIndex()) {
                 throw new IllegalArgumentException("routing_partition_size is incompatible with routing_path");
             }
             indexMode = metadata.getIndexMode();
             assert indexMode != null : "Index mode must be set for ExtractFromSource routing";
-            this.trackTimeSeriesRoutingHash = indexMode == IndexMode.TIME_SERIES
+            this.trackTimeSeriesRoutingHash = indexMode.isTsdb()
                 && metadata.getCreationVersion().onOrAfter(IndexVersions.TIME_SERIES_ROUTING_HASH_IN_ID);
             this.useTimeSeriesSyntheticId = metadata.useTimeSeriesSyntheticId();
             addIdWithRoutingHash = (indexMode == IndexMode.LOGSDB
@@ -537,8 +558,8 @@ public abstract class IndexRouting {
         public static class ForRoutingPath extends ExtractFromSource {
             private final Predicate<String> isRoutingPath;
 
-            ForRoutingPath(IndexMetadata metadata, RoutingFunction routingFunction) {
-                super(metadata, routingFunction, metadata.getRoutingPaths());
+            ForRoutingPath(IndexMetadata metadata, RoutingFunction routingFunction, IndexReshardingMetadata reshardingMetadata) {
+                super(metadata, routingFunction, reshardingMetadata, metadata.getRoutingPaths());
                 isRoutingPath = Regex.simpleMatcher(metadata.getRoutingPaths().toArray(String[]::new));
             }
 
@@ -607,9 +628,9 @@ public abstract class IndexRouting {
             private final Predicate<String> isDimensionField;
             private final IndexVersion creationVersionForTsid;
 
-            ForIndexDimensions(IndexMetadata metadata, RoutingFunction routingFunction) {
-                super(metadata, routingFunction, metadata.getTimeSeriesDimensions());
-                assert metadata.getIndexMode() == IndexMode.TIME_SERIES : "Index mode must be time_series for ForIndexDimensions routing";
+            ForIndexDimensions(IndexMetadata metadata, RoutingFunction routingFunction, IndexReshardingMetadata reshardingMetadata) {
+                super(metadata, routingFunction, reshardingMetadata, metadata.getTimeSeriesDimensions());
+                assert IndexMode.isTsdb(metadata.getIndexMode()) : "Index mode must be time_series for ForIndexDimensions routing";
                 assert metadata.getCreationVersion().onOrAfter(IndexVersions.TSID_CREATED_DURING_ROUTING)
                     : "Index version must be at least "
                         + IndexVersions.TSID_CREATED_DURING_ROUTING

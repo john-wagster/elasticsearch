@@ -190,7 +190,9 @@ public class InternalUsers {
                         // System data streams for storing uploaded file data for Agent diagnostics and Endpoint response actions
                         ".fleet-fileds*",
                         // System data stream for kibana workflows
-                        ".workflows*"
+                        ".workflows*",
+                        // System data stream for kibana saved objects change history
+                        ".kibana_change_history*"
                     )
                     .privileges(
                         filterNonNull(
@@ -318,6 +320,7 @@ public class InternalUsers {
         new RoleDescriptor(
             UsernamesField.CROSS_PROJECT_SEARCH_ROLE_NAME,
             new String[] {
+                XPackInfoAction.REMOTE_TYPE.name(),
                 RemoteClusterService.REMOTE_CLUSTER_HANDSHAKE_ACTION_NAME,
                 TaskCancellationService.REMOTE_CLUSTER_BAN_PARENT_ACTION_NAME,
                 TaskCancellationService.REMOTE_CLUSTER_CANCEL_CHILD_ACTION_NAME,

@@ -10,6 +10,7 @@ package org.elasticsearch.xpack.esql.datasource.compress;
 import com.github.luben.zstd.Zstd;
 
 import org.elasticsearch.test.ESTestCase;
+import org.junit.Before;
 
 import java.nio.ByteBuffer;
 
@@ -25,9 +26,8 @@ import static org.hamcrest.Matchers.equalTo;
  */
 public class PanamaZstdTests extends ESTestCase {
 
-    @Override
-    public void setUp() throws Exception {
-        super.setUp();
+    @Before
+    public void requireNativeZstd() throws Exception {
         assumeTrue("PanamaZstd requires the native zstd binding to be available on this platform", PanamaZstd.instance().isAvailable());
     }
 
@@ -110,6 +110,54 @@ public class PanamaZstdTests extends ESTestCase {
         ByteBuffer dst = ByteBuffer.allocateDirect(8);
         ByteBuffer src = ByteBuffer.allocateDirect(8);
         var ex = expectThrows(IllegalStateException.class, () -> unavailable.decompressDirect(dst, 0, 1, src, 0, 1));
+        assertThat(ex.getMessage(), containsString("not available"));
+    }
+
+    // ---------- Heap byte[] overloads (Phase 2: replaces the parquet cold path's zstd-jni call) ----------
+
+    public void testDecompressHeapRoundTrip() {
+        byte[] original = randomByteArrayOfLength(between(100, 4096));
+        byte[] compressed = jniCompress(original);
+        byte[] decompressed = new byte[original.length];
+        int written = PanamaZstd.instance().decompressHeap(decompressed, compressed);
+        assertThat(written, equalTo(original.length));
+        assertArrayEquals(original, decompressed);
+    }
+
+    public void testCompressHeapByteForByteWithZstdJni() {
+        byte[] original = randomByteArrayOfLength(between(100, 4096));
+        // Both libraries call into the same libzstd binary, so for the same input + level they
+        // must produce the same frame. This is the strongest cross-check that compressHeap binds
+        // ZSTD_compress with the right calling convention.
+        byte[] jniCompressed = jniCompress(original);
+        byte[] panamaOut = new byte[PanamaZstd.instance().compressBound(original.length)];
+        int panamaLen = PanamaZstd.instance().compressHeap(panamaOut, 0, panamaOut.length, original, 0, original.length, 3);
+        byte[] panamaCompressed = java.util.Arrays.copyOf(panamaOut, panamaLen);
+        assertArrayEquals(jniCompressed, panamaCompressed);
+    }
+
+    /**
+     * Cross-direction: compress via Panama, decompress via the zstd-jni reference. Catches a
+     * regression in compressHeap's libzstd error reporting (e.g. truncating a valid frame).
+     */
+    public void testPanamaCompressRoundTripsViaZstdJni() {
+        byte[] original = randomByteArrayOfLength(between(100, 4096));
+        byte[] panamaOut = new byte[PanamaZstd.instance().compressBound(original.length)];
+        int panamaLen = PanamaZstd.instance().compressHeap(panamaOut, 0, panamaOut.length, original, 0, original.length, 3);
+        byte[] compressed = java.util.Arrays.copyOf(panamaOut, panamaLen);
+        byte[] decompressed = Zstd.decompress(compressed, original.length);
+        assertArrayEquals(original, decompressed);
+    }
+
+    public void testUnavailableDecompressHeapThrowsIllegalState() {
+        PanamaZstd unavailable = new PanamaZstd(null);
+        var ex = expectThrows(IllegalStateException.class, () -> unavailable.decompressHeap(new byte[8], new byte[8]));
+        assertThat(ex.getMessage(), containsString("not available"));
+    }
+
+    public void testUnavailableCompressHeapThrowsIllegalState() {
+        PanamaZstd unavailable = new PanamaZstd(null);
+        var ex = expectThrows(IllegalStateException.class, () -> unavailable.compressHeap(new byte[64], 0, 64, new byte[8], 0, 8, 3));
         assertThat(ex.getMessage(), containsString("not available"));
     }
 

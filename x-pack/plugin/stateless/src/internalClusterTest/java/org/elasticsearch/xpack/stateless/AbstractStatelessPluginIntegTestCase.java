@@ -27,6 +27,7 @@ import org.elasticsearch.cluster.ClusterStateUpdateTask;
 import org.elasticsearch.cluster.coordination.stateless.StoreHeartbeatService;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.metadata.NodesShutdownMetadata;
+import org.elasticsearch.cluster.metadata.ProjectId;
 import org.elasticsearch.cluster.metadata.SingleNodeShutdownMetadata;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.node.DiscoveryNodeRole;
@@ -39,6 +40,7 @@ import org.elasticsearch.common.blobstore.OperationPurpose;
 import org.elasticsearch.common.blobstore.fs.FsBlobContainer;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.settings.ClusterSettings;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeUnit;
 import org.elasticsearch.common.unit.ByteSizeValue;
@@ -81,6 +83,7 @@ import org.elasticsearch.test.transport.MockTransportService;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.xpack.stateless.cache.SearchCommitPrefetcherDynamicSettings;
 import org.elasticsearch.xpack.stateless.cache.SharedBlobCacheWarmingService;
+import org.elasticsearch.xpack.stateless.cache.SharedBlobCacheWarmingService.WarmTarget;
 import org.elasticsearch.xpack.stateless.cache.StatelessSharedBlobCacheService;
 import org.elasticsearch.xpack.stateless.cache.WarmingRatioProvider;
 import org.elasticsearch.xpack.stateless.cluster.coordination.StatelessElectionStrategy;
@@ -115,6 +118,7 @@ import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -170,11 +174,10 @@ public abstract class AbstractStatelessPluginIntegTestCase extends ESIntegTestCa
     }
 
     @After
-    public void tearDown() throws Exception {
+    public void waitForMerges() throws Exception {
         // This works for stateless as we build a new cluster for each TEST. However, if we move to SUITE this might need to be in
         // AfterClass depending on the test's needs.
         waitForMergesToFinish();
-        super.tearDown();
     }
 
     private static void waitForMergesToFinish() throws Exception {
@@ -260,7 +263,7 @@ public abstract class AbstractStatelessPluginIntegTestCase extends ESIntegTestCa
             IndexShard indexShard,
             StatelessCompoundCommit commit,
             BlobStoreCacheDirectory blobStoreCacheDirectory,
-            @Nullable Map<BlobFile, Long> endOffsetsToWarm,
+            @Nullable Map<BlobFile, WarmTarget> endTargetsToWarm,
             boolean preWarmForIdLookup,
             ActionListener<Void> listener
         ) {
@@ -396,6 +399,17 @@ public abstract class AbstractStatelessPluginIntegTestCase extends ESIntegTestCa
             builder.put(SharedBlobCacheWarmingService.SEARCH_OFFLINE_WARMING_ENABLED_SETTING.getKey(), randomBoolean());
         }
         builder.put(SearchCommitPrefetcherDynamicSettings.STATELESS_SEARCH_USE_INTERNAL_FILES_REPLICATED_CONTENT.getKey(), randomBoolean());
+        // Sometimes explicitly set a setting to its default value, which doubles as a test for the setting being registered
+        for (Setting<Boolean> cacheSetting : List.of(
+            StatelessSharedBlobCacheService.STATELESS_CACHE_BOOST_PREFERENCE_ENABLED_SETTING,
+            StatelessSharedBlobCacheService.STATELESS_CACHE_EVICT_OBSOLETE_REGIONS_ENABLED_SETTING,
+            StatelessSharedBlobCacheService.STATELESS_CACHE_DEMOTE_CLOSED_SHARD_REGIONS_ENABLED_SETTING,
+            StatelessSharedBlobCacheService.STATELESS_CACHE_EVICT_DELETED_INDEX_REGIONS_ENABLED_SETTING
+        )) {
+            if (randomBoolean()) {
+                builder.put(cacheSetting.getKey(), cacheSetting.getDefault(Settings.EMPTY));
+            }
+        }
         return builder;
     }
 
@@ -531,6 +545,11 @@ public abstract class AbstractStatelessPluginIntegTestCase extends ESIntegTestCa
         ObjectStoreTestUtils.getObjectStoreStatelessMockRepository(objectStoreService).setStrategy(strategy);
     }
 
+    protected void setProjectRepositoryStrategy(String nodeName, ProjectId projectId, StatelessMockRepositoryStrategy strategy) {
+        ObjectStoreService objectStoreService = getObjectStoreService(nodeName);
+        ObjectStoreTestUtils.getProjectObjectStoreStatelessMockRepository(projectId, objectStoreService).setStrategy(strategy);
+    }
+
     protected void setNodeRepositoryFailureStrategy(
         String node,
         boolean failReads,
@@ -631,12 +650,13 @@ public abstract class AbstractStatelessPluginIntegTestCase extends ESIntegTestCa
                 String blobName,
                 long blobSize,
                 BlobContainer.BlobMultiPartInputStreamProvider provider,
-                boolean failIfAlreadyExists
+                boolean failIfAlreadyExists,
+                Executor executor
             ) throws IOException {
                 if (failWrites) {
                     failIfNeeded(purpose, blobName);
                 }
-                super.blobContainerWriteBlobAtomic(originalRunnable, purpose, blobName, blobSize, provider, failIfAlreadyExists);
+                super.blobContainerWriteBlobAtomic(originalRunnable, purpose, blobName, blobSize, provider, failIfAlreadyExists, executor);
             }
 
             @Override
