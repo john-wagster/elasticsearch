@@ -772,4 +772,46 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
         }
     }
 
+    public void testAshIndexAndSearch() throws IOException {
+        int dimensions = 64;
+        int numDocs = 200;
+        ESNextDiskBBQVectorsFormat ashFormat = new ESNextDiskBBQVectorsFormat(
+            QuantEncoding.TWO_BIT_4BIT_QUERY,
+            MIN_VECTORS_PER_CLUSTER,
+            MIN_CENTROIDS_PER_PARENT_CLUSTER,
+            null
+        ).withAshEnabled();
+        Codec ashCodec = TestUtil.alwaysKnnVectorsFormat(ashFormat);
+        try (Directory dir = newDirectory()) {
+            IndexWriterConfig iwc = newIndexWriterConfig();
+            iwc.setCodec(ashCodec);
+            try (IndexWriter w = new IndexWriter(dir, iwc)) {
+                for (int i = 0; i < numDocs; i++) {
+                    Document doc = new Document();
+                    doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                    w.addDocument(doc);
+                }
+                w.forceMerge(1);
+                try (IndexReader reader = DirectoryReader.open(w)) {
+                    for (LeafReaderContext ctx : reader.leaves()) {
+                        LeafReader leafReader = ctx.reader();
+                        float[] query = randomVector(dimensions);
+                        TopDocs topDocs = leafReader.searchNearestVectors(
+                            "f",
+                            query,
+                            10,
+                            AcceptDocs.fromLiveDocs(leafReader.getLiveDocs(), leafReader.maxDoc()),
+                            Integer.MAX_VALUE
+                        );
+                        assertThat(topDocs.scoreDocs, arrayWithSize(Math.min(leafReader.maxDoc(), 10)));
+                        // Verify scores are in descending order
+                        for (int i = 0; i < topDocs.scoreDocs.length - 1; i++) {
+                            assertTrue("Scores should be descending", topDocs.scoreDocs[i].score >= topDocs.scoreDocs[i + 1].score);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 }

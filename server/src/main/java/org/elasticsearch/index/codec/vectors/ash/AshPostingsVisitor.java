@@ -48,7 +48,7 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
     private final int packedCodeBytes;
     private final VectorSimilarityFunction similarityFunction;
 
-    // Precomputed query transform: queryTransformed = (query) @ W  (centered per posting list at query time)
+    // Precomputed query transform: queryTransformed = (query) @ W (centered per posting list at query time)
     private final float[] queryTransformed;
 
     // Scratch buffers

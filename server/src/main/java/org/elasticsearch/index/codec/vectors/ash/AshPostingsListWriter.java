@@ -27,6 +27,7 @@ import org.elasticsearch.simdvec.ESVectorUtil;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.function.IntFunction;
+
 import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
 
 /**
@@ -52,8 +53,14 @@ public class AshPostingsListWriter {
     /**
      * ASH-specific configuration parameters for the write path.
      */
-    public record AshConfig(float projectedDimsFraction, int bitsPerDim, AsymmetricHashingQuantizer.Method method, int trainingIterations,
-        int trainingFactor, long seed) {}
+    public record AshConfig(
+        float projectedDimsFraction,
+        int bitsPerDim,
+        AsymmetricHashingQuantizer.Method method,
+        int trainingIterations,
+        int trainingFactor,
+        long seed
+    ) {}
 
     /**
      * Returns the projection matrix trained during the most recent

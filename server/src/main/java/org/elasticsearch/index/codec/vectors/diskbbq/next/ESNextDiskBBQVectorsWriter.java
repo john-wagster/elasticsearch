@@ -104,6 +104,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
     private final String sliceField;
     private final IvfFlushConfigSource flushConfigSource;
     private final IvfMergeConfigResolver mergeConfigResolver;
+    private final boolean useAsh;
+
+    // Temporary storage for ASH projection matrix between buildAndWritePostingsLists and writePreconditioner
+    private org.elasticsearch.index.codec.vectors.ash.AshProjectionMatrix pendingAshMatrix;
 
     @Override
     protected boolean supportsByteNative() {
@@ -126,7 +130,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         int flatVectorThreshold,
         String sliceField,
         IvfFlushConfigSource flushConfigSource,
-        IvfMergeConfigResolver mergeConfigResolver
+        IvfMergeConfigResolver mergeConfigResolver,
+        boolean useAsh
     ) throws IOException {
         super(
             state,
@@ -152,6 +157,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         this.sliceField = sliceField;
         this.flushConfigSource = flushConfigSource != null ? flushConfigSource : IvfFlushConfigSource.empty();
         this.mergeConfigResolver = mergeConfigResolver != null ? mergeConfigResolver : IvfMergeConfigResolver.useCodecDefault();
+        this.useAsh = useAsh;
         if (sliceField != null) {
             Sort sort = state.segmentInfo.getIndexSort();
             if (sort == null || sort.getSort().length == 0) {
@@ -169,12 +175,18 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
 
     @Override
     protected IvfSegmentConfig beginIvfFieldFlush(FieldInfo fieldInfo) throws IOException {
+        if (useAsh) {
+            return IvfSegmentConfig.fromCodecDefaultsWithAsh(centroidIndexFormat, quantEncoding, 0.5f, 2, 5, 10, 42L);
+        }
         IvfSegmentConfig codec = IvfSegmentConfig.fromCodecDefaults(centroidIndexFormat, quantEncoding, doPrecondition);
         return flushConfigSource.load(segmentWriteState, fieldInfo).orElse(codec);
     }
 
     @Override
     protected IvfSegmentConfig resolveMergeConfig(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
+        if (useAsh) {
+            return IvfSegmentConfig.fromCodecDefaultsWithAsh(centroidIndexFormat, quantEncoding, 0.5f, 2, 5, 10, 42L);
+        }
         return mergeConfigResolver.resolve(
             fieldInfo,
             mergeState,
@@ -189,6 +201,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
     @Override
     protected Preconditioner inheritPreconditioner(FieldInfo fieldInfo, MergeState mergeState, IvfSegmentConfig fieldWritingContext)
         throws IOException {
+        if (requireSegmentConfig(fieldWritingContext).useAsh()) {
+            // ASH trains a new W matrix on each merge; no inheritance needed
+            return null;
+        }
         if (requireSegmentConfig(fieldWritingContext).usePrecondition()) {
             for (KnnVectorsReader reader : mergeState.knnVectorsReaders) {
                 if (reader instanceof VectorPreconditioner vp) {
@@ -206,6 +222,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
 
     @Override
     protected Preconditioner createPreconditioner(int dimension, IvfSegmentConfig ivfSegmentConfig) {
+        if (requireSegmentConfig(ivfSegmentConfig).useAsh()) {
+            // ASH writes its own projection matrix; no standard preconditioner needed
+            return null;
+        }
         if (requireSegmentConfig(ivfSegmentConfig).usePrecondition()) {
             return Preconditioner.createPreconditioner(dimension, blockDimension);
         } else {
@@ -215,7 +235,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
 
     @Override
     protected void writePreconditioner(Preconditioner preconditioner, IndexOutput out) throws IOException {
-        if (preconditioner != null) {
+        if (pendingAshMatrix != null) {
+            pendingAshMatrix.write(out);
+            pendingAshMatrix = null;
+        } else if (preconditioner != null) {
             preconditioner.write(out);
         }
     }
@@ -254,6 +277,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                 overspillAssignments,
                 ashConfig
             );
+            pendingAshMatrix = ashWriter.getAshProjectionMatrix();
             return new CentroidOffsetAndLength(result.offsets(), result.lengths());
         }
 
@@ -412,6 +436,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                 overspillAssignments,
                 ashConfig
             );
+            pendingAshMatrix = ashWriter.getAshProjectionMatrix();
             return new CentroidOffsetAndLength(result.offsets(), result.lengths());
         }
 

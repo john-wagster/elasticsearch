@@ -114,6 +114,12 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
     private final String sliceField;
     private final IvfFlushConfigSource ivfFlushConfigSource;
     private final IvfMergeConfigResolver ivfMergeConfigResolver;
+    private final boolean useAsh;
+    private final float ashProjectedDimsFraction;
+    private final int ashBitsPerDim;
+    private final int ashTrainingIterations;
+    private final int ashTrainingFactor;
+    private final long ashSeed;
 
     public ESNextDiskBBQVectorsFormat(int vectorPerCluster, int centroidsPerParentCluster, String sliceField) {
         this(QuantEncoding.ONE_BIT_4BIT_QUERY, vectorPerCluster, centroidsPerParentCluster, sliceField);
@@ -270,6 +276,59 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
         this.sliceField = sliceField;
         this.ivfFlushConfigSource = ivfFlushConfigSource;
         this.ivfMergeConfigResolver = ivfMergeConfigResolver;
+        // ASH defaults: disabled unless explicitly configured
+        this.useAsh = false;
+        this.ashProjectedDimsFraction = 0.5f;
+        this.ashBitsPerDim = 2;
+        this.ashTrainingIterations = 5;
+        this.ashTrainingFactor = 10;
+        this.ashSeed = 42L;
+    }
+
+    /** Creates a copy of this format with ASH enabled. For testing and PoC use. */
+    public ESNextDiskBBQVectorsFormat withAshEnabled() {
+        ESNextDiskBBQVectorsFormat copy = new ESNextDiskBBQVectorsFormat(
+            this.quantEncoding,
+            this.vectorPerCluster,
+            this.centroidsPerParentCluster,
+            this.sliceField
+        );
+        // Use reflection-free approach: create a new instance that has useAsh=true
+        // Since the fields are final, we need to construct a proper instance.
+        // For now, return a wrapper that overrides fieldsWriter.
+        return new AshEnabledFormat(this);
+    }
+
+    private static class AshEnabledFormat extends ESNextDiskBBQVectorsFormat {
+        private final ESNextDiskBBQVectorsFormat delegate;
+
+        AshEnabledFormat(ESNextDiskBBQVectorsFormat delegate) {
+            super(delegate.quantEncoding, delegate.vectorPerCluster, delegate.centroidsPerParentCluster, delegate.sliceField);
+            this.delegate = delegate;
+        }
+
+        @Override
+        public KnnVectorsWriter fieldsWriter(SegmentWriteState state) throws IOException {
+            return new ESNextDiskBBQVectorsWriter(
+                state,
+                delegate.rawVectorFormat.getName(),
+                delegate.useDirectIO,
+                delegate.rawVectorFormat.fieldsWriter(state),
+                delegate.centroidIndexFormat,
+                delegate.quantEncoding,
+                delegate.vectorPerCluster,
+                delegate.centroidsPerParentCluster,
+                delegate.mergeExec,
+                delegate.numMergeWorkers,
+                delegate.preconditioningBlockDimension,
+                false,
+                delegate.flatVectorThreshold,
+                delegate.sliceField,
+                delegate.ivfFlushConfigSource,
+                delegate.ivfMergeConfigResolver,
+                true  // useAsh = true
+            );
+        }
     }
 
     /** Constructs a format using the given graph construction parameters and scalar quantization. */
@@ -295,7 +354,8 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
             flatVectorThreshold,
             sliceField,
             ivfFlushConfigSource,
-            ivfMergeConfigResolver
+            ivfMergeConfigResolver,
+            useAsh
         );
     }
 

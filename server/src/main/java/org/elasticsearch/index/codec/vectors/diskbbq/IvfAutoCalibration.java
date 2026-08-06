@@ -308,7 +308,18 @@ public class IvfAutoCalibration {
             doPreconditionResult,
             calibratedSegments
         );
-        return new IvfSegmentConfig(CentroidIndexFormat.FLAT, bestEncoding, doPreconditionResult, avgOversample, false, 0.5f, 2, 5, 10, 42L);
+        return new IvfSegmentConfig(
+            CentroidIndexFormat.FLAT,
+            bestEncoding,
+            doPreconditionResult,
+            avgOversample,
+            false,
+            0.5f,
+            2,
+            5,
+            10,
+            42L
+        );
     }
 
     /** Per-encoding accumulator for {@link #selectFromMergeState}: live-vector-weighted oversample and precondition votes. */

@@ -243,6 +243,10 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         if (fieldEntry == null) {
             return null;
         }
+        // ASH stores its projection matrix in the preconditioner slot, not a standard Preconditioner
+        if (fieldEntry.useAsh()) {
+            return null;
+        }
         long preconditionerOffset = fieldEntry.preconditionerOffset();
         long preconditionerLength = fieldEntry.preconditionerLength();
         if (preconditionerLength > 0) {
