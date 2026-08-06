@@ -49,6 +49,7 @@ import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer.DEFAULT_LAMBDA;
 import static org.elasticsearch.index.codec.vectors.diskbbq.PostingMetadata.NO_ORDINAL;
@@ -62,6 +63,9 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
     implements
         VectorPreconditioner,
         CalibrationAwareReader {
+
+    private final ConcurrentHashMap<String, org.elasticsearch.index.codec.vectors.ash.AshProjectionMatrix> ashMatrixCache =
+        new ConcurrentHashMap<>();
 
     public ESNextDiskBBQVectorsReader(SegmentReadState state, GenericFlatVectorReaders.LoadFlatVectorsReader getFormatReader)
         throws IOException {
@@ -205,6 +209,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         float rescoreOversample = Float.intBitsToFloat(input.readInt());
         // ESNext format extension: byte centroid flag
         boolean byteCentroids = input.readByte() == 1;
+        // ASH flag
+        boolean useAsh = input.readByte() == 1;
         return new NextFieldEntry(
             rawVectorFormat,
             useDirectIOReads,
@@ -225,7 +231,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             numSlices,
             maxSliceSize,
             rescoreOversample,
-            byteCentroids
+            byteCentroids,
+            useAsh
         );
     }
 
@@ -246,6 +253,27 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             }
         }
         return null;
+    }
+
+    private org.elasticsearch.index.codec.vectors.ash.AshProjectionMatrix getAshProjectionMatrix(FieldInfo fieldInfo) throws IOException {
+        return ashMatrixCache.computeIfAbsent(fieldInfo.name, name -> {
+            try {
+                final NextFieldEntry fieldEntry = fields.get(fieldInfo.number);
+                long preconditionerOffset = fieldEntry.preconditionerOffset;
+                long preconditionerLength = fieldEntry.preconditionerLength;
+                if (preconditionerLength > 0) {
+                    IndexInput slice = ivfCentroids.slice("ash-preconditioner", preconditionerOffset, preconditionerLength);
+                    slice.seek(0);
+                    var matrix = org.elasticsearch.index.codec.vectors.ash.AshProjectionMatrix.read(slice);
+                    // Eagerly compute wT so it's ready for concurrent search threads
+                    matrix.wT();
+                    return matrix;
+                }
+                return null;
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
     }
 
     @Override
@@ -347,6 +375,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         final int maxSliceSize;
         private final float rescoreOversample;
         private final boolean byteCentroids;
+        private final boolean useAsh;
 
         NextFieldEntry(
             String rawVectorFormat,
@@ -368,7 +397,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             int numSlices,
             int maxSliceSize,
             float rescoreOversample,
-            boolean byteCentroids
+            boolean byteCentroids,
+            boolean useAsh
         ) {
             super(
                 rawVectorFormat,
@@ -392,6 +422,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             this.maxSliceSize = maxSliceSize;
             this.rescoreOversample = rescoreOversample;
             this.byteCentroids = byteCentroids;
+            this.useAsh = useAsh;
         }
 
         public CentroidIndexFormat centroidIndexFormat() {
@@ -416,6 +447,10 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
 
         public boolean byteCentroids() {
             return byteCentroids;
+        }
+
+        public boolean useAsh() {
+            return useAsh;
         }
 
         @Override
@@ -453,6 +488,23 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 yield widened;
             }
         };
+
+        // ASH path: use AshPostingsVisitor with precomputed W matrix
+        if (entry.useAsh()) {
+            var ashMatrix = getAshProjectionMatrix(fieldInfo);
+            if (ashMatrix != null) {
+                return new org.elasticsearch.index.codec.vectors.ash.AshPostingsVisitor(
+                    ashMatrix.w(),
+                    ashMatrix.wT(),
+                    target,
+                    fieldInfo,
+                    indexInput,
+                    needsScoring,
+                    2 // bitsPerDim — TODO: read from segment config
+                );
+            }
+        }
+
         if (entry.numSlices > 0) {
             final int bitsRequired = DirectWriter.bitsRequired(entry.maxSliceSize);
             final long sizeLookup = DirectWriter.bytesRequired(entry.numSlices, bitsRequired);

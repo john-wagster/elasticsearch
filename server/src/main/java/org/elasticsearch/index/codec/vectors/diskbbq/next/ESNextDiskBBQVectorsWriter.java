@@ -232,6 +232,31 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         IvfSegmentConfig fieldWritingContext
     ) throws IOException {
         final IvfSegmentConfig segmentConfig = requireSegmentConfig(fieldWritingContext);
+
+        // ASH path: delegate to AshPostingsListWriter for flush
+        if (segmentConfig.useAsh()) {
+            var ashWriter = new org.elasticsearch.index.codec.vectors.ash.AshPostingsListWriter();
+            var ashConfig = new org.elasticsearch.index.codec.vectors.ash.AshPostingsListWriter.AshConfig(
+                segmentConfig.ashProjectedDimsFraction(),
+                segmentConfig.ashBitsPerDim(),
+                org.elasticsearch.index.codec.vectors.ash.AsymmetricHashingQuantizer.Method.LEARNED,
+                segmentConfig.ashTrainingIterations(),
+                segmentConfig.ashTrainingFactor(),
+                segmentConfig.ashSeed()
+            );
+            var result = ashWriter.buildAndWrite(
+                fieldInfo,
+                centroidSupplier,
+                (org.apache.lucene.index.FloatVectorValues) vectorValues,
+                postingsOutput,
+                fileOffset,
+                assignments,
+                overspillAssignments,
+                ashConfig
+            );
+            return new CentroidOffsetAndLength(result.offsets(), result.lengths());
+        }
+
         final QuantEncoding effectiveQuantEncoding = segmentConfig.quantEncoding();
         FlatCentroidClusters centroidClusters = (FlatCentroidClusters) centroidSupplier.centroidIndex();
         final boolean isByte = vectorValues instanceof ByteVectorValues;
@@ -365,6 +390,31 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         IvfSegmentConfig fieldWritingContext
     ) throws IOException {
         final IvfSegmentConfig segmentConfig = requireSegmentConfig(fieldWritingContext);
+
+        // ASH path: delegate to AshPostingsListWriter for merge
+        if (segmentConfig.useAsh()) {
+            var ashWriter = new org.elasticsearch.index.codec.vectors.ash.AshPostingsListWriter();
+            var ashConfig = new org.elasticsearch.index.codec.vectors.ash.AshPostingsListWriter.AshConfig(
+                segmentConfig.ashProjectedDimsFraction(),
+                segmentConfig.ashBitsPerDim(),
+                org.elasticsearch.index.codec.vectors.ash.AsymmetricHashingQuantizer.Method.LEARNED,
+                segmentConfig.ashTrainingIterations(),
+                segmentConfig.ashTrainingFactor(),
+                segmentConfig.ashSeed()
+            );
+            var result = ashWriter.buildAndWrite(
+                fieldInfo,
+                centroidSupplier,
+                (org.apache.lucene.index.FloatVectorValues) vectorValues,
+                postingsOutput,
+                fileOffset,
+                assignments,
+                overspillAssignments,
+                ashConfig
+            );
+            return new CentroidOffsetAndLength(result.offsets(), result.lengths());
+        }
+
         final QuantEncoding effectiveQuantEncoding = segmentConfig.quantEncoding();
         // first, quantize all the vectors into a temporary file
         var vectorSimilarityFunction = fieldInfo.getVectorSimilarityFunction();
@@ -745,6 +795,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         // ESNext format extension: byte centroid flag — indicates whether raw centroids
         // are stored as 1 byte/dim (byte fields) or 4 bytes/dim (float fields).
         metaOutput.writeByte(byteCentroids ? (byte) 1 : (byte) 0);
+        // ASH flag
+        metaOutput.writeByte(segmentConfig.useAsh() ? (byte) 1 : (byte) 0);
     }
 
     @Override
