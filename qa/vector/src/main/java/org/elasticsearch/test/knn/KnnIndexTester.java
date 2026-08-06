@@ -221,16 +221,17 @@ public class KnnIndexTester {
 
         format = switch (args.indexType()) {
             case IVF -> {
-                var encoding = "ash".equals(args.quantizationType())
-                    ? ESNextDiskBBQVectorsFormat.QuantEncoding.ASH
+                boolean isAsh = "ash".equals(args.quantizationType());
+                var encoding = isAsh
+                    ? QuantEncoding.TWO_BIT_4BIT_QUERY
                     : resolveQuantEncoding(quantizeBits, args.queryQuantizeBits());
-                boolean doPrecondition = "ash".equals(args.quantizationType()) ? false : args.doPrecondition();
+                boolean doPrecondition = isAsh ? false : args.doPrecondition();
                 // Use flatVectorThreshold from config, or default to -1 (dynamic) if not specified
                 int flatVectorThreshold = args.flatVectorThreshold() >= 0 ? args.flatVectorThreshold() : -1;
                 IvfMergeConfigResolver mergeConfigResolver = args.autoCalibrate()
                     ? IvfAutoCalibration.mergeConfigResolver(args.ivfClusterSize())
                     : IvfMergeConfigResolver.useCodecDefault();
-                yield new ESNextDiskBBQVectorsFormat(
+                var baseFormat = new ESNextDiskBBQVectorsFormat(
                     encoding,
                     args.ivfClusterSize(),
                     args.secondaryClusterSize() == -1
@@ -247,6 +248,7 @@ public class KnnIndexTester {
                     IvfFlushConfigSource.empty(),
                     mergeConfigResolver
                 );
+                yield isAsh ? baseFormat.withAshEnabled() : baseFormat;
             }
             case GPU_HNSW -> {
                 int graphDegree = ES92GpuHnswVectorsFormat.cagraGraphDegree(args.hnswM());

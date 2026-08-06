@@ -83,7 +83,8 @@ public record TestConfiguration(
     String directoryType,
     DatasetConfig datasetConfig,
     int numDeletedDocs,
-    long deleteSeed
+    long deleteSeed,
+    String quantizationType
 ) {
 
     static final ParseField DATASET_FIELD = new ParseField("dataset");
@@ -110,6 +111,7 @@ public record TestConfiguration(
     static final ParseField VECTOR_SPACE_FIELD = new ParseField("vector_space");
     static final ParseField QUANTIZE_BITS_FIELD = new ParseField("quantize_bits");
     static final ParseField QUERY_QUANTIZE_BITS_FIELD = new ParseField("query_quantize_bits");
+    static final ParseField QUANTIZATION_TYPE_FIELD = new ParseField("quantization_type");
     static final ParseField VECTOR_ENCODING_FIELD = new ParseField("vector_encoding");
     static final ParseField DIMENSIONS_FIELD = new ParseField("dimensions");
     static final ParseField EARLY_TERMINATION_FIELD = new ParseField("early_termination");
@@ -180,6 +182,7 @@ public record TestConfiguration(
             QUERY_QUANTIZE_BITS_FIELD,
             ObjectParser.ValueType.INT_OR_NULL
         );
+        PARSER.declareString(Builder::setQuantizationType, QUANTIZATION_TYPE_FIELD);
         PARSER.declareString(Builder::setVectorEncoding, VECTOR_ENCODING_FIELD);
         PARSER.declareInt(Builder::setDimensions, DIMENSIONS_FIELD);
         PARSER.declareFieldArray(
@@ -446,6 +449,7 @@ public record TestConfiguration(
         private VectorSimilarityFunction vectorSpace;
         private Integer quantizeBits = null;
         private Integer queryQuantizeBits = null;
+        private String quantizationType = null;
         private KnnIndexTester.VectorEncoding vectorEncoding = KnnIndexTester.VectorEncoding.FLOAT32;
         private int dimensions;
         private List<Boolean> earlyTermination = List.of(Boolean.FALSE);
@@ -601,6 +605,11 @@ public record TestConfiguration(
 
         public Builder setQuantizeBits(Integer quantizeBits) {
             this.quantizeBits = quantizeBits;
+            return this;
+        }
+
+        public Builder setQuantizationType(String quantizationType) {
+            this.quantizationType = quantizationType;
             return this;
         }
 
@@ -1015,7 +1024,8 @@ public record TestConfiguration(
                 directoryType,
                 datasetConfig,
                 numDeletedDocs,
-                deleteSeed
+                deleteSeed,
+                quantizationType
             );
         }
 
