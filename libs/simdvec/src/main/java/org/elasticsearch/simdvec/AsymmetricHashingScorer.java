@@ -207,4 +207,54 @@ public final class AsymmetricHashingScorer {
         }
         return (float) dot * scale + queryDotCentroid + offset;
     }
+
+    /**
+     * Scores a single multi-bit encoded database vector from a packed byte buffer at a given offset.
+     * This overload avoids array copies when scoring from a bulk-read buffer.
+     *
+     * @param queryTransformedForCluster precomputed (query - centroid) @ W for this cluster
+     * @param queryDotCentroid precomputed query . centroid for this cluster
+     * @param packedCodes byte buffer containing packed codes (may contain multiple vectors)
+     * @param codeOffset starting byte offset for this vector's codes
+     * @param nDims number of projected dimensions
+     * @param bitsPerDim bits per dimension
+     * @param scale the scale factor for this vector
+     * @param offset the offset correction for this vector
+     * @return approximate dot product
+     */
+    public static float scoreOneVectorMultiBit(
+        float[] queryTransformedForCluster,
+        float queryDotCentroid,
+        byte[] packedCodes,
+        int codeOffset,
+        int nDims,
+        int bitsPerDim,
+        float scale,
+        float offset
+    ) {
+        int planeBytes = (nDims + 7) >>> 3;
+        int numLevels = 1 << bitsPerDim;
+        double centerOffset = (numLevels - 1) / 2.0;
+
+        double sumAll = 0;
+        double[] planeSums = new double[bitsPerDim];
+
+        for (int j = 0; j < nDims; j++) {
+            float qt = queryTransformedForCluster[j];
+            sumAll += qt;
+            int byteIdx = j >>> 3;
+            int bitIdx = 7 - (j & 7);
+            for (int p = 0; p < bitsPerDim; p++) {
+                if ((packedCodes[codeOffset + p * planeBytes + byteIdx] & (1 << bitIdx)) != 0) {
+                    planeSums[p] += qt;
+                }
+            }
+        }
+
+        double dot = -centerOffset * sumAll;
+        for (int p = 0; p < bitsPerDim; p++) {
+            dot += (1 << p) * planeSums[p];
+        }
+        return (float) dot * scale + queryDotCentroid + offset;
+    }
 }

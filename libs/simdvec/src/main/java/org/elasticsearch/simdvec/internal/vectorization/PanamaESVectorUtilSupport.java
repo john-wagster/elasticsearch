@@ -745,6 +745,12 @@ public sealed class PanamaESVectorUtilSupport implements ESVectorUtilSupport per
         return DefaultESVectorUtilSupport.ipFloatBitImpl(q, d);
     }
 
+    @Override
+    public float ipFloatBit(float[] q, byte[] d, int dOffset) {
+        // Delegate to scalar implementation for now; Panama-accelerated offset variant can be added later
+        return DefaultESVectorUtilSupport.ipFloatBitOffsetImpl(q, d, dOffset);
+    }
+
     static float ipFloatBit512(float[] q, byte[] d) {
         assert q.length == d.length * Byte.SIZE;
         int i = 0;

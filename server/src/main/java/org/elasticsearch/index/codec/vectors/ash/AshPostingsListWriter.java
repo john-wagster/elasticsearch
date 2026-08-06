@@ -7,27 +7,27 @@
  * License v3.0 only", or the "Server Side Public License, v 1".
  */
 
-package org.elasticsearch.index.codec.vectors.diskbbq.next.ash;
+package org.elasticsearch.index.codec.vectors.ash;
 
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.util.packed.PackedInts;
 import org.apache.lucene.util.packed.PackedLongValues;
-import org.elasticsearch.index.codec.vectors.cluster.KMeansResult;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSupplier;
 import org.elasticsearch.index.codec.vectors.diskbbq.DocIdsWriter;
+import org.elasticsearch.index.codec.vectors.diskbbq.FlatCentroidClusters;
 import org.elasticsearch.index.codec.vectors.diskbbq.IntSorter;
-import org.elasticsearch.index.codec.vectors.diskbbq.next.IvfSegmentConfig;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
+import org.elasticsearch.simdvec.AsymmetricHashingScorer;
 import org.elasticsearch.simdvec.ESVectorUtil;
 
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.function.IntFunction;
 
-import static org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans.NO_SOAR_ASSIGNMENT;
+import static org.elasticsearch.index.codec.vectors.cluster.Soar.NO_SOAR_ASSIGNMENT;
 import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
 
 /**
@@ -36,7 +36,6 @@ import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
  * This class encapsulates the full ASH write pipeline:
  * <ol>
  *   <li>Collect vectors from the segment</li>
- *   <li>Run independent ASH k-means clustering (few coarse clusters for centering)</li>
  *   <li>Train the projection matrix W via the ASH optimization procedure</li>
  *   <li>Encode all vectors (project, center, scalar-quantize)</li>
  *   <li>Write posting lists grouped by IVF cluster assignment</li>
@@ -50,6 +49,12 @@ public class AshPostingsListWriter {
     private static final Logger logger = LogManager.getLogger(AshPostingsListWriter.class);
 
     private AshProjectionMatrix ashProjectionMatrix;
+
+    /**
+     * ASH-specific configuration parameters for the write path.
+     */
+    public record AshConfig(float projectedDimsFraction, int bitsPerDim, AsymmetricHashingQuantizer.Method method, int trainingIterations,
+        int trainingFactor, long seed) {}
 
     /**
      * Returns the projection matrix trained during the most recent
@@ -73,23 +78,6 @@ public class AshPostingsListWriter {
 
     /**
      * Trains ASH, encodes vectors, and writes posting lists to the given output.
-     * <p>
-     * Each vector is written to its primary IVF cluster's posting list and, if it has a
-     * SOAR overspill assignment, also to that overspill cluster's posting list. In both
-     * cases the vector is re-encoded against the centroid of the posting list it is being
-     * written to, so its (scale, offset, packed_codes) payload is centroid-specific.
-     * Training of W uses primary assignments only.
-     *
-     * @param fieldInfo            field metadata (dimensions, similarity function)
-     * @param centroidSupplier     provides IVF cluster centroids and second-level clusters
-     * @param floatVectorValues    access to the segment's float vectors by ordinal
-     * @param postingsOutput       output stream for the posting list data
-     * @param fileOffset           base offset in the postings file (for relative addressing)
-     * @param assignments          primary IVF cluster assignment per vector ordinal
-     * @param overspillAssignments SOAR overspill assignment per vector ordinal (or
-     *                             {@code NO_SOAR_ASSIGNMENT} sentinels / empty array if none)
-     * @param segmentConfig        ASH configuration (projectedDimsFraction, bitsPerDim, method, training iterations)
-     * @return per-cluster offsets and lengths
      */
     public PostingsOffsetAndLength buildAndWrite(
         FieldInfo fieldInfo,
@@ -99,7 +87,7 @@ public class AshPostingsListWriter {
         long fileOffset,
         int[] assignments,
         int[] overspillAssignments,
-        IvfSegmentConfig segmentConfig
+        AshConfig ashConfig
     ) throws IOException {
         int nVectors = assignments.length;
         int originalDim = fieldInfo.getVectorDimension();
@@ -114,12 +102,12 @@ public class AshPostingsListWriter {
 
         // Create and train the ASH quantizer
         AsymmetricHashingQuantizer ashQuantizer = new AsymmetricHashingQuantizer(
-            segmentConfig.ashProjectedDimsFraction(),
-            segmentConfig.ashBitsPerDim(),
-            segmentConfig.ashMethod(),
-            segmentConfig.ashTrainingIterations(),
-            segmentConfig.ashTrainingFactor(),
-            segmentConfig.ashSeed()
+            ashConfig.projectedDimsFraction(),
+            ashConfig.bitsPerDim(),
+            ashConfig.method(),
+            ashConfig.trainingIterations(),
+            ashConfig.trainingFactor(),
+            ashConfig.seed()
         );
 
         IntFunction<float[]> centroidGetter = (i) -> {
@@ -130,8 +118,7 @@ public class AshPostingsListWriter {
             }
         };
 
-        // Train W using primary assignments only. Each vector is later re-encoded against
-        // whichever posting list's centroid it lands in (primary and/or SOAR overspill).
+        // Train W using primary assignments only.
         long t0 = System.currentTimeMillis();
         float[][] w = ashQuantizer.train(vectors, centroidGetter);
         long t1 = System.currentTimeMillis();
@@ -175,12 +162,12 @@ public class AshPostingsListWriter {
         // Write posting lists, re-encoding each vector against its posting list's centroid
         final PackedLongValues.Builder offsets = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
         final PackedLongValues.Builder lengths = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
-        final int bitsPerDim = segmentConfig.ashBitsPerDim();
+        final int bitsPerDim = ashConfig.bitsPerDim();
         final int[] docIds = new int[maxPostingListSize];
         final int[] docDeltas = new int[maxPostingListSize];
         final int[] clusterOrds = new int[maxPostingListSize];
         DocIdsWriter idsWriter = new DocIdsWriter();
-        KMeansResult centroidClusters = centroidSupplier.secondLevelClusters();
+        FlatCentroidClusters centroidClusters = (FlatCentroidClusters) centroidSupplier.centroidIndex();
 
         long encodeNanos = 0;
         for (int c = 0; c < nClusters; c++) {
@@ -231,12 +218,10 @@ public class AshPostingsListWriter {
                         precomputed
                     );
                     encodeNanos += System.nanoTime() - e0;
-                    packedCodes[j] = bitsPerDim == 1
-                        ? AsymmetricHashingScorer.packBinaryCodes(enc.xEnc())
-                        : AsymmetricHashingScorer.packMultiBitCodes(enc.xEnc(), bitsPerDim);
+                    packedCodes[j] = AsymmetricHashingScorer.packMultiBitCodes(enc.xEnc(), bitsPerDim);
                     blockScales[j] = Float.floatToFloat16(enc.scale());
                     blockOffsets[j] = Float.floatToFloat16(enc.offset());
-                    // Compute docSum: sum of unsigned 2-bit code values from the packed bit-planes
+                    // Compute docSum: sum of unsigned code values from the packed bit-planes
                     int docSum = 0;
                     int pb = packedCodes[j].length / bitsPerDim; // planeBytes
                     for (int b = 0; b < pb; b++) {
