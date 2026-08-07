@@ -29,15 +29,13 @@ import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
  * PostingVisitor for ASH-encoded posting lists.
  * <p>
  * Reads bit-packed 2-bit codes with float16 scale/offset per vector and scores them
- * asymmetrically using the centered query transform per posting list.
- * <p>
- * The scoring convention follows the ASH paper's centered-query approach:
+ * asymmetrically using the precomputed query transform. The on-disk format per block is:
  * <pre>
- *   queryTransformed = (query - centroid_k) @ W = Wq - Wμₖ
- *   score = scale * ⟨queryTransformed, code⟩ + ⟨q, μₖ⟩ + offset
+ *   [docIds][packed_codes × blockSize][scales × blockSize][offsets × blockSize][docSums × blockSize]
  * </pre>
- * where offset = ⟨x, μ⟩ - ‖μ‖² (no cross-term needed because the query is centered).
- * The subtraction Wq - Wμₖ is O(d) per posting list using precomputed centroid projections.
+ * <p>
+ * This initial implementation uses scalar scoring via {@link AsymmetricHashingScorer#scoreOneVectorMultiBit}.
+ * SIMD-accelerated bulk scoring (ipFloatBit, D2Q4) will be added in a follow-up.
  */
 public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
 
@@ -50,12 +48,8 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
     private final int packedCodeBytes;
     private final VectorSimilarityFunction similarityFunction;
 
-    // Raw query projection: Wq (computed once per query in constructor)
-    private final float[] rawQueryTransformed;
-    // Precomputed Wμ per centroid (read from disk, shape nCentroids x nDims)
-    private final float[][] centroidProjections;
-    // Working buffer for centered query: W(q-μ) = Wq - Wμ (updated per posting list)
-    private final float[] queryTransformedCentered;
+    // Precomputed query transform: queryTransformed = (query) @ W (centered per posting list at query time)
+    private final float[] queryTransformed;
 
     // Scratch buffers
     private final DocIdsWriter idsWriter = new DocIdsWriter();
@@ -77,7 +71,6 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         float[][] w,
         float[][] wT,
         float[] query,
-        float[][] centroidProjections,
         FieldInfo fieldInfo,
         IndexInput indexInput,
         Bits acceptDocs,
@@ -91,16 +84,12 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         this.bitsPerDim = bitsPerDim;
         this.packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims, bitsPerDim);
         this.similarityFunction = fieldInfo.getVectorSimilarityFunction();
-        this.centroidProjections = centroidProjections;
 
-        // Precompute raw query projection: Wq (once per query)
-        this.rawQueryTransformed = new float[nDims];
+        // Precompute query projection: queryTransformed[j] = dot(query, wT[j])
+        this.queryTransformed = new float[nDims];
         for (int j = 0; j < nDims; j++) {
-            rawQueryTransformed[j] = ESVectorUtil.dotProduct(query, wT[j]);
+            queryTransformed[j] = ESVectorUtil.dotProduct(query, wT[j]);
         }
-
-        // Working buffer for centered query (updated per posting list)
-        this.queryTransformedCentered = new float[nDims];
 
         this.bulkCodeBuf = new byte[BULK_SIZE * packedCodeBytes];
     }
@@ -115,30 +104,22 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         docBase = 0;
 
         // Approximate centroid dot product derived from quantized centroid scoring.
-        float centroidDistance = switch (similarityFunction) {
+        // This avoids reading centroid floats per posting list.
+        centroidDistance = switch (similarityFunction) {
             case EUCLIDEAN -> ((1 / score) - 1) - centroidToParentSqDist;
             case COSINE, DOT_PRODUCT -> 2 * score - 1;
             case MAXIMUM_INNER_PRODUCT -> score - 1;
         };
         currentQueryDotCentroid = centroidDistance;
 
-        // Center the query for this posting list: W(q-μ) = Wq - Wμ
-        int centroidOrd = metadata.centroidOrdinal();
-        if (centroidOrd >= 0 && centroidProjections != null) {
-            float[] wMu = centroidProjections[centroidOrd];
-            for (int j = 0; j < nDims; j++) {
-                queryTransformedCentered[j] = rawQueryTransformed[j] - wMu[j];
-            }
-        } else {
-            // Fallback: use raw query (no centering) — should not happen in production
-            System.arraycopy(rawQueryTransformed, 0, queryTransformedCentered, 0, nDims);
-        }
-
         return vectors;
     }
 
+    private float centroidDistance;
+
     @Override
     public int visit(KnnCollector knnCollector) throws IOException {
+        indexInput.seek(indexInput.getFilePointer()); // no-op, position is already correct after reset
         int scoredDocs = 0;
 
         int limit = vectors - BULK_SIZE + 1;
@@ -178,14 +159,14 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
             bulkDocSums[j] = indexInput.readShort();
         }
 
-        // Score each vector using scalar multi-bit scorer with centered query
+        // Score each vector using scalar multi-bit scorer
         float maxScore = Float.NEGATIVE_INFINITY;
         for (int j = 0; j < blockSize; j++) {
             if (docIdsScratch[j] != -1) {
                 float scale = Float.float16ToFloat(bulkScalesF16[j]);
                 float offset = Float.float16ToFloat(bulkOffsetsF16[j]);
                 float rawScore = AsymmetricHashingScorer.scoreOneVectorMultiBit(
-                    queryTransformedCentered,
+                    queryTransformed,
                     currentQueryDotCentroid,
                     bulkCodeBuf,
                     j * packedCodeBytes,

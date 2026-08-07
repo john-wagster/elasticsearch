@@ -175,12 +175,20 @@ public final class AsymmetricHashingQuantizer {
         // Scale: norm / codeNorm
         float scale = codeNorm > 0 ? (float) Math.sqrt(centered.centroidNormSq) / codeNorm : 0;
 
-        // Offset per ASH paper Equation 16: ⟨x, μ⟩ - ‖μ‖²
-        // The scorer receives the centered query (q-μ) @ W, so no cross-term is needed here.
-        // At query time: W(q-μ) = Wq - Wμ (cheap O(d) subtraction using precomputed Wμ per centroid).
+        // Offset = dot(vector, centroid) - dot(centroid, centroid) - scale * dot(centroid @ W, code)
+        // The scorer projects the raw query (q @ W, not (q-μ) @ W) so the cross-term is needed
+        // here to account for the centroid's contribution in the projected space.
         float dotVecCent = ESVectorUtil.dotProduct(vector, centroid, originalDim);
         float dotCentCent = ESVectorUtil.dotProduct(centroid, centroid, originalDim);
         float offset = dotVecCent - dotCentCent;
+        // Subtract the cross-term: scale * sum_j (centroid @ W)[j] * xEnc[j]
+        for (int j = 0; j < nDims; j++) {
+            double transformedCent = 0;
+            for (int d = 0; d < originalDim; d++) {
+                transformedCent = Math.fma(centroid[d], w[d][j], transformedCent);
+            }
+            offset -= (float) (scale * transformedCent * xEnc[j]);
+        }
 
         return new EncodedVector(xEnc, scale, offset);
     }
@@ -253,9 +261,16 @@ public final class AsymmetricHashingQuantizer {
         // Scale: norm / codeNorm
         float scale = codeNorm > 0 ? (float) Math.sqrt(centered.centroidNormSq) / codeNorm : 0;
 
-        // Offset = ⟨x, μ⟩ - ‖μ‖² (see encodeOne for full derivation)
+        // Offset = dot(vector, centroid) - ||centroid||^2 - scale * dot(centroidProjected, xEnc)
         float dotVecCent = ESVectorUtil.dotProduct(vector, centroid);
         float offset = dotVecCent - precomputed.centroidNormSq();
+        // Subtract the cross-term using precomputed centroid @ W
+        float[] centroidProjected = precomputed.centroidProjected();
+        double correction = 0;
+        for (int j = 0; j < nDims; j++) {
+            correction = Math.fma(centroidProjected[j], xEnc[j], correction);
+        }
+        offset -= (float) (scale * correction);
 
         return new EncodedVector(xEnc, scale, offset);
     }
@@ -330,12 +345,20 @@ public final class AsymmetricHashingQuantizer {
             // scale = norm / codeNorm
             scales[i] = codeNorms[i] > 0 ? norms[i] / codeNorms[i] : 0;
 
-            // Offset = ⟨x, μ⟩ - ‖μ‖² (see encodeOne for full derivation)
+            // offset = dot(vector, centroid) - dot(centroid, centroid) - scale[i] * dot(centroids @ W, xEnc)
             float[] centroid = centroids.apply(assignments[i]);
 
             float dotVecCent = ESVectorUtil.dotProduct(vectors[i], centroid, originalDim);
             float dotCentCent = ESVectorUtil.dotProduct(centroid, centroid, originalDim);
             offsets[i] += dotVecCent - dotCentCent;
+
+            for (int j = 0; j < nDims; j++) {
+                double transformedCent = 0;
+                for (int d = 0; d < originalDim; d++) {
+                    transformedCent = Math.fma(centroid[d], w[d][j], transformedCent);
+                }
+                offsets[i] -= (float) (scales[i] * transformedCent * xEnc[i][j]);
+            }
         }
 
         nClusters++; // we have the max cluster ID so far, add one to get the size

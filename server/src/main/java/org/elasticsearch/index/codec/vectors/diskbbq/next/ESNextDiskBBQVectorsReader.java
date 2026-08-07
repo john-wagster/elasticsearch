@@ -493,7 +493,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             }
         };
 
-        // ASH path: use AshPostingsVisitor with precomputed W matrix and centroid projections
+        // ASH path: use AshPostingsVisitor with precomputed W matrix
         if (entry.useAsh()) {
             var ashMatrix = getAshProjectionMatrix(fieldInfo);
             if (ashMatrix != null) {
@@ -501,7 +501,6 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                     ashMatrix.w(),
                     ashMatrix.wT(),
                     target,
-                    ashMatrix.centroidProjections(),
                     fieldInfo,
                     indexInput,
                     needsScoring,
