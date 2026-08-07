@@ -132,9 +132,20 @@ public class AshPostingsListWriter {
 
         // Transpose W once for SIMD-friendly dot products during encoding
         float[][] wT = AsymmetricHashingQuantizer.transposeW(w);
+        int nDims = w[0].length;
 
-        // Store the projection matrix for later serialization
-        this.ashProjectionMatrix = new AshProjectionMatrix(w);
+        // Precompute centroid projections (Wμ per centroid) for query-time centered scoring.
+        // At query time: W(q - μₖ) = Wq - centroidProjections[k] — a cheap O(d) subtraction.
+        float[][] centroidProjections = new float[nClusters][nDims];
+        for (int c = 0; c < nClusters; c++) {
+            float[] centroid = centroidSupplier.centroid(c);
+            for (int j = 0; j < nDims; j++) {
+                centroidProjections[c][j] = ESVectorUtil.dotProduct(centroid, wT[j]);
+            }
+        }
+
+        // Store the projection matrix + centroid projections for later serialization
+        this.ashProjectionMatrix = new AshProjectionMatrix(w, centroidProjections);
 
         // Build cluster-to-vector mappings, counting primary + SOAR overspill assignments
         int[] centroidVectorCount = new int[nClusters];

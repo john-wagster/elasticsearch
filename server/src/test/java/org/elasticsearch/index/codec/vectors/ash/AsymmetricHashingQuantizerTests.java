@@ -376,19 +376,8 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
         float[][] w = ash.train(vectors, centroidGetter);
         int nDims = w[0].length;
 
-        // Pre-transform each query: qt = q @ W
-        float[][] qt = new float[nQueries][nDims];
-        for (int q = 0; q < nQueries; q++) {
-            for (int j = 0; j < nDims; j++) {
-                double s = 0;
-                for (int d = 0; d < dim; d++) {
-                    s += (double) queries[q][d] * w[d][j];
-                }
-                qt[q][j] = (float) s;
-            }
-        }
-
         // Score matrices: approx[q][i] = ASH-approximated dot(q, v_i), exact[q][i] = true dot
+        // The scorer expects the centered query transform: qt = (q - μ) @ W
         double[][] exact = new double[nQueries][nVectors];
         double[][] approx = new double[nQueries][nVectors];
         for (int i = 0; i < nVectors; i++) {
@@ -402,13 +391,23 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
                     exactDot += (double) queries[q][d] * vectors[i][d];
                 }
 
+                // Centered query transform: (q - μ) @ W
+                float[] qtCentered = new float[nDims];
+                for (int j = 0; j < nDims; j++) {
+                    double s = 0;
+                    for (int d = 0; d < dim; d++) {
+                        s += (double) (queries[q][d] - c[d]) * w[d][j];
+                    }
+                    qtCentered[j] = (float) s;
+                }
+
                 double qDotC = 0;
                 for (int d = 0; d < dim; d++) {
                     qDotC += (double) queries[q][d] * c[d];
                 }
 
                 float approxScore = AsymmetricHashingScorer.scoreOneVectorMultiBit(
-                    qt[q],
+                    qtCentered,
                     (float) qDotC,
                     packed,
                     nDims,

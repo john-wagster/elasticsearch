@@ -17,33 +17,48 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /**
- * Serialization for the ASH projection matrix W. Stored in the
- * preconditioner slot of the {@code .cenivf} file.
+ * Serialization for the ASH projection matrix W and precomputed centroid projections.
+ * Stored in the preconditioner slot of the {@code .cenivf} file.
  * <p>
- * Centroids are not stored here — in the IVF context, each posting list implicitly
- * defines its own centroid, so no separate centroid storage is needed.
+ * The centroid projections (Wμ per centroid) are precomputed at index time so that at
+ * query time, the centered query W(q-μ) = Wq - Wμ can be computed with a cheap O(d)
+ * subtraction per posting list rather than an O(D*d) matrix multiply.
  * <p>
  * Format:
  * <pre>
  *   [int] originalDim (number of rows in W)
  *   [int] nDims (number of columns in W, i.e. projected dimensions)
  *   [float[originalDim * nDims]] W matrix in row-major order (little-endian)
+ *   [int] nCentroids (number of precomputed centroid projections)
+ *   [float[nCentroids * nDims]] centroid projections (Wμ) in row-major order (little-endian)
  * </pre>
  */
 public final class AshProjectionMatrix {
 
     private final float[][] w;
+    private final float[][] centroidProjections; // shape (nCentroids, nDims): Wμ per centroid, or null if not stored
     private final int originalDim;
     private final int nDims;
     private float[][] wT; // lazily computed transposed W (nDims x originalDim) for SIMD dot products
 
     /**
-     * Creates a projection matrix.
+     * Creates a projection matrix without centroid projections.
      *
      * @param w the projection matrix, shape (originalDim, nDims)
      */
     public AshProjectionMatrix(float[][] w) {
+        this(w, null);
+    }
+
+    /**
+     * Creates a projection matrix with precomputed centroid projections.
+     *
+     * @param w the projection matrix, shape (originalDim, nDims)
+     * @param centroidProjections precomputed Wμ per centroid, shape (nCentroids, nDims), or null
+     */
+    public AshProjectionMatrix(float[][] w, float[][] centroidProjections) {
         this.w = w;
+        this.centroidProjections = centroidProjections;
         this.originalDim = w.length;
         this.nDims = w.length > 0 ? w[0].length : 0;
     }
@@ -67,6 +82,17 @@ public final class AshProjectionMatrix {
             wT = transposeMatrix(w);
         }
         return wT;
+    }
+
+    /**
+     * Returns the precomputed centroid projections (Wμ per centroid), shape (nCentroids, nDims).
+     * At query time, the centered query for a posting list with centroid k is:
+     * W(q - μₖ) = Wq - centroidProjections[k]
+     *
+     * @return centroid projections array, or null if not stored
+     */
+    public float[][] centroidProjections() {
+        return centroidProjections;
     }
 
     /**
@@ -99,7 +125,7 @@ public final class AshProjectionMatrix {
     }
 
     /**
-     * Writes the projection matrix to the given output.
+     * Writes the projection matrix and centroid projections to the given output.
      *
      * @param out the index output to write to
      * @throws IOException if an I/O error occurs
@@ -107,15 +133,29 @@ public final class AshProjectionMatrix {
     public void write(IndexOutput out) throws IOException {
         out.writeInt(originalDim);
         out.writeInt(nDims);
-        ByteBuffer buffer = ByteBuffer.allocate(nDims * Float.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer buffer = ByteBuffer.allocate(Math.max(nDims, originalDim) * Float.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+        // Write W
         for (int i = 0; i < originalDim; i++) {
+            buffer.clear();
+            buffer.limit(nDims * Float.BYTES);
             buffer.asFloatBuffer().put(w[i]);
             out.writeBytes(buffer.array(), nDims * Float.BYTES);
+        }
+        // Write centroid projections
+        int nCentroids = centroidProjections != null ? centroidProjections.length : 0;
+        out.writeInt(nCentroids);
+        if (nCentroids > 0) {
+            for (int c = 0; c < nCentroids; c++) {
+                buffer.clear();
+                buffer.limit(nDims * Float.BYTES);
+                buffer.asFloatBuffer().put(centroidProjections[c]);
+                out.writeBytes(buffer.array(), nDims * Float.BYTES);
+            }
         }
     }
 
     /**
-     * Reads a projection matrix from the given input.
+     * Reads a projection matrix and centroid projections from the given input.
      *
      * @param in the index input to read from
      * @return the deserialized projection matrix
@@ -125,13 +165,27 @@ public final class AshProjectionMatrix {
         int originalDim = in.readInt();
         int nDims = in.readInt();
         float[][] w = new float[originalDim][nDims];
-        byte[] rowBytes = new byte[nDims * Float.BYTES];
+        byte[] rowBytes = new byte[Math.max(nDims, originalDim) * Float.BYTES];
         ByteBuffer buffer = ByteBuffer.wrap(rowBytes).order(ByteOrder.LITTLE_ENDIAN);
         for (int i = 0; i < originalDim; i++) {
             in.readBytes(rowBytes, 0, nDims * Float.BYTES);
+            buffer.clear();
+            buffer.limit(nDims * Float.BYTES);
             buffer.asFloatBuffer().get(w[i]);
         }
-        return new AshProjectionMatrix(w);
+        // Read centroid projections
+        int nCentroids = in.readInt();
+        float[][] centroidProjections = null;
+        if (nCentroids > 0) {
+            centroidProjections = new float[nCentroids][nDims];
+            for (int c = 0; c < nCentroids; c++) {
+                in.readBytes(rowBytes, 0, nDims * Float.BYTES);
+                buffer.clear();
+                buffer.limit(nDims * Float.BYTES);
+                buffer.asFloatBuffer().get(centroidProjections[c]);
+            }
+        }
+        return new AshProjectionMatrix(w, centroidProjections);
     }
 
     /**
@@ -140,6 +194,10 @@ public final class AshProjectionMatrix {
      * @return total bytes when serialized
      */
     public long byteSize() {
-        return Integer.BYTES * 2L + (long) originalDim * nDims * Float.BYTES;
+        long size = Integer.BYTES * 3L + (long) originalDim * nDims * Float.BYTES;
+        if (centroidProjections != null) {
+            size += (long) centroidProjections.length * nDims * Float.BYTES;
+        }
+        return size;
     }
 }

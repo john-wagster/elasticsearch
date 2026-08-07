@@ -83,7 +83,8 @@ public class AshProjectionMatrixTests extends ESTestCase {
             pm.write(out);
         }
 
-        long expectedSize = Integer.BYTES * 2L + (long) originalDim * nDims * Float.BYTES;
+        // 2 ints (originalDim, nDims) + W data + 1 int (nCentroids=0)
+        long expectedSize = Integer.BYTES * 3L + (long) originalDim * nDims * Float.BYTES;
         assertEquals(expectedSize, pm.byteSize());
     }
 

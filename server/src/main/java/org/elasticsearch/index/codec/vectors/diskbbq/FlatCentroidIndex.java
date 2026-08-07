@@ -258,7 +258,7 @@ public class FlatCentroidIndex {
                 long postingListOffset = centroids.readLong();
                 long postingListLength = centroids.readLong();
                 // NO_ORDINAL indicates that the global centroid should be used for query quantization
-                return new PostingMetadata(postingListOffset, postingListLength, NO_ORDINAL, score);
+                return new PostingMetadata(postingListOffset, postingListLength, NO_ORDINAL, score, Float.NaN, centroidOrd);
             }
         };
     }
@@ -378,7 +378,7 @@ public class FlatCentroidIndex {
                 long postingListOffset = centroids.readLong();
                 long postingListLength = centroids.readLong();
                 int parentOrd = centroids.readInt();
-                return new PostingMetadata(postingListOffset, postingListLength, parentOrd, score);
+                return new PostingMetadata(postingListOffset, postingListLength, parentOrd, score, Float.NaN, centroidOrdinal);
             }
 
             private long nextCentroid() throws IOException {
