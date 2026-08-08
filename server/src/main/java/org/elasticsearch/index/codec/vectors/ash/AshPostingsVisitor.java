@@ -34,7 +34,7 @@ import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
  *   [docIds][packed_codes × blockSize][scales × blockSize][offsets × blockSize][docSums × blockSize]
  * </pre>
  * <p>
- * This initial implementation uses scalar scoring via {@link AsymmetricHashingScorer#scoreOneVectorMultiBit}.
+ * This initial implementation uses scalar scoring via {@link AsymmetricHashingScorer#score}.
  * SIMD-accelerated bulk scoring (ipFloatBit, D2Q4) will be added in a follow-up.
  */
 public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
@@ -82,7 +82,7 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         this.acceptDocs = acceptDocs;
         this.nDims = w[0].length;
         this.bitsPerDim = bitsPerDim;
-        this.packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims, bitsPerDim);
+        this.packedCodeBytes = AsymmetricHashingScorer.packedLength(nDims, bitsPerDim);
         this.similarityFunction = fieldInfo.getVectorSimilarityFunction();
 
         // Precompute query projection: queryTransformed[j] = dot(query, wT[j])
@@ -165,7 +165,7 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
             if (docIdsScratch[j] != -1) {
                 float scale = Float.float16ToFloat(bulkScalesF16[j]);
                 float offset = Float.float16ToFloat(bulkOffsetsF16[j]);
-                float rawScore = AsymmetricHashingScorer.scoreOneVectorMultiBit(
+                float rawScore = AsymmetricHashingScorer.score(
                     queryTransformed,
                     currentQueryDotCentroid,
                     bulkCodeBuf,

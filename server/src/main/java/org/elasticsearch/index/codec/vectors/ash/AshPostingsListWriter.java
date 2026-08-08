@@ -215,14 +215,9 @@ public class AshPostingsListWriter {
                 for (int j = 0; j < blockSize; j++) {
                     int vectorOrd = cluster[clusterOrds[written + j]];
                     long e0 = System.nanoTime();
-                    AsymmetricHashingQuantizer.EncodedVector enc = ashQuantizer.encodeOneFast(
-                        vectors[vectorOrd],
-                        centroid,
-                        wT,
-                        precomputed
-                    );
+                    AsymmetricHashingQuantizer.EncodedVector enc = ashQuantizer.encode(vectors[vectorOrd], centroid, wT, precomputed);
                     encodeNanos += System.nanoTime() - e0;
-                    packedCodes[j] = AsymmetricHashingScorer.packMultiBitCodes(enc.xEnc(), bitsPerDim);
+                    packedCodes[j] = AsymmetricHashingScorer.pack(enc.xEnc(), bitsPerDim);
                     blockScales[j] = Float.floatToFloat16(enc.scale());
                     blockOffsets[j] = Float.floatToFloat16(enc.offset());
                     // Compute docSum: sum of unsigned code values from the packed bit-planes
