@@ -100,6 +100,13 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
     public static final int MAX_PRECONDITIONING_BLOCK_DIMS = 384;
     public static final int MAX_DIMENSIONS = 4096;
 
+    // ASH (Asymmetric Scalar Hashing) defaults
+    public static final float DEFAULT_ASH_PROJECTED_DIMS_FRACTION = 0.5f;
+    public static final int DEFAULT_ASH_BITS_PER_DIM = 2;
+    public static final int DEFAULT_ASH_TRAINING_ITERATIONS = 5;
+    public static final int DEFAULT_ASH_TRAINING_FACTOR = 10;
+    public static final long DEFAULT_ASH_SEED = 42L;
+
     private final CentroidIndexFormat centroidIndexFormat = CentroidIndexFormat.FLAT;
     private final QuantEncoding quantEncoding;
     private final int vectorPerCluster;
@@ -139,7 +146,8 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
             defaultFlatThreshold(vectorPerCluster),
             sliceField,
             IvfFlushConfigSource.empty(),
-            IvfMergeConfigResolver.useCodecDefault()
+            IvfMergeConfigResolver.useCodecDefault(),
+            false
         );
     }
 
@@ -168,7 +176,8 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
             defaultFlatThreshold(vectorPerCluster),
             sliceField,
             IvfFlushConfigSource.empty(),
-            IvfMergeConfigResolver.useCodecDefault()
+            IvfMergeConfigResolver.useCodecDefault(),
+            false
         );
     }
 
@@ -198,13 +207,15 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
             flatVectorThreshold,
             sliceField,
             IvfFlushConfigSource.empty(),
-            IvfMergeConfigResolver.useCodecDefault()
+            IvfMergeConfigResolver.useCodecDefault(),
+            false
         );
     }
 
     /**
      * @param ivfFlushConfigSource optional per-field config on flush ({@code null} uses writer default)
      * @param ivfMergeConfigResolver optional merged config on merge ({@code null} uses writer default)
+     * @param useAsh whether to enable ASH (Asymmetric Scalar Hashing) for this format
      */
     public ESNextDiskBBQVectorsFormat(
         QuantEncoding quantEncoding,
@@ -219,7 +230,8 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
         int flatVectorThreshold,
         String sliceField,
         IvfFlushConfigSource ivfFlushConfigSource,
-        IvfMergeConfigResolver ivfMergeConfigResolver
+        IvfMergeConfigResolver ivfMergeConfigResolver,
+        boolean useAsh
     ) {
         super(NAME);
         if (vectorPerCluster < MIN_VECTORS_PER_CLUSTER || vectorPerCluster > MAX_VECTORS_PER_CLUSTER) {
@@ -276,59 +288,12 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
         this.sliceField = sliceField;
         this.ivfFlushConfigSource = ivfFlushConfigSource;
         this.ivfMergeConfigResolver = ivfMergeConfigResolver;
-        // ASH defaults: disabled unless explicitly configured
-        this.useAsh = false;
-        this.ashProjectedDimsFraction = 0.5f;
-        this.ashBitsPerDim = 2;
-        this.ashTrainingIterations = 5;
-        this.ashTrainingFactor = 10;
-        this.ashSeed = 42L;
-    }
-
-    /** Creates a copy of this format with ASH enabled. For testing and PoC use. */
-    public ESNextDiskBBQVectorsFormat withAshEnabled() {
-        ESNextDiskBBQVectorsFormat copy = new ESNextDiskBBQVectorsFormat(
-            this.quantEncoding,
-            this.vectorPerCluster,
-            this.centroidsPerParentCluster,
-            this.sliceField
-        );
-        // Use reflection-free approach: create a new instance that has useAsh=true
-        // Since the fields are final, we need to construct a proper instance.
-        // For now, return a wrapper that overrides fieldsWriter.
-        return new AshEnabledFormat(this);
-    }
-
-    private static class AshEnabledFormat extends ESNextDiskBBQVectorsFormat {
-        private final ESNextDiskBBQVectorsFormat delegate;
-
-        AshEnabledFormat(ESNextDiskBBQVectorsFormat delegate) {
-            super(delegate.quantEncoding, delegate.vectorPerCluster, delegate.centroidsPerParentCluster, delegate.sliceField);
-            this.delegate = delegate;
-        }
-
-        @Override
-        public KnnVectorsWriter fieldsWriter(SegmentWriteState state) throws IOException {
-            return new ESNextDiskBBQVectorsWriter(
-                state,
-                delegate.rawVectorFormat.getName(),
-                delegate.useDirectIO,
-                delegate.rawVectorFormat.fieldsWriter(state),
-                delegate.centroidIndexFormat,
-                delegate.quantEncoding,
-                delegate.vectorPerCluster,
-                delegate.centroidsPerParentCluster,
-                delegate.mergeExec,
-                delegate.numMergeWorkers,
-                delegate.preconditioningBlockDimension,
-                false,
-                delegate.flatVectorThreshold,
-                delegate.sliceField,
-                delegate.ivfFlushConfigSource,
-                delegate.ivfMergeConfigResolver,
-                true  // useAsh = true
-            );
-        }
+        this.useAsh = useAsh;
+        this.ashProjectedDimsFraction = DEFAULT_ASH_PROJECTED_DIMS_FRACTION;
+        this.ashBitsPerDim = DEFAULT_ASH_BITS_PER_DIM;
+        this.ashTrainingIterations = DEFAULT_ASH_TRAINING_ITERATIONS;
+        this.ashTrainingFactor = DEFAULT_ASH_TRAINING_FACTOR;
+        this.ashSeed = DEFAULT_ASH_SEED;
     }
 
     /** Constructs a format using the given graph construction parameters and scalar quantization. */

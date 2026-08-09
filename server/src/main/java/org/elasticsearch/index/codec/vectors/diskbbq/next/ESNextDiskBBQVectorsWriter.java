@@ -176,7 +176,15 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
     @Override
     protected IvfSegmentConfig beginIvfFieldFlush(FieldInfo fieldInfo) throws IOException {
         if (useAsh) {
-            return IvfSegmentConfig.fromCodecDefaultsWithAsh(centroidIndexFormat, quantEncoding, 0.5f, 2, 5, 10, 42L);
+            return IvfSegmentConfig.fromCodecDefaultsWithAsh(
+                centroidIndexFormat,
+                quantEncoding,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_PROJECTED_DIMS_FRACTION,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_BITS_PER_DIM,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_TRAINING_ITERATIONS,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_TRAINING_FACTOR,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_SEED
+            );
         }
         IvfSegmentConfig codec = IvfSegmentConfig.fromCodecDefaults(centroidIndexFormat, quantEncoding, doPrecondition);
         return flushConfigSource.load(segmentWriteState, fieldInfo).orElse(codec);
@@ -185,7 +193,15 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
     @Override
     protected IvfSegmentConfig resolveMergeConfig(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
         if (useAsh) {
-            return IvfSegmentConfig.fromCodecDefaultsWithAsh(centroidIndexFormat, quantEncoding, 0.5f, 2, 5, 10, 42L);
+            return IvfSegmentConfig.fromCodecDefaultsWithAsh(
+                centroidIndexFormat,
+                quantEncoding,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_PROJECTED_DIMS_FRACTION,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_BITS_PER_DIM,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_TRAINING_ITERATIONS,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_TRAINING_FACTOR,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_SEED
+            );
         }
         return mergeConfigResolver.resolve(
             fieldInfo,

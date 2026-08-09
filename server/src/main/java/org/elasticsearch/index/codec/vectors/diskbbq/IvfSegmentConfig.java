@@ -9,6 +9,12 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq;
 
+import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.DEFAULT_ASH_BITS_PER_DIM;
+import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.DEFAULT_ASH_PROJECTED_DIMS_FRACTION;
+import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.DEFAULT_ASH_SEED;
+import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.DEFAULT_ASH_TRAINING_FACTOR;
+import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.DEFAULT_ASH_TRAINING_ITERATIONS;
+
 /**
  * Per-segment (per-field) IVF configuration persisted in {@code mivf}. It has four parts:
  * <ul>
@@ -42,11 +48,11 @@ public record IvfSegmentConfig(
         false,
         Float.NaN,
         false,
-        0.5f,
-        2,
-        5,
-        10,
-        42L
+        DEFAULT_ASH_PROJECTED_DIMS_FRACTION,
+        DEFAULT_ASH_BITS_PER_DIM,
+        DEFAULT_ASH_TRAINING_ITERATIONS,
+        DEFAULT_ASH_TRAINING_FACTOR,
+        DEFAULT_ASH_SEED
     );
 
     public static IvfSegmentConfig fromCodecDefaults(
@@ -54,7 +60,18 @@ public record IvfSegmentConfig(
         QuantEncoding quantEncoding,
         boolean doPrecondition
     ) {
-        return new IvfSegmentConfig(centroidIndexFormat, quantEncoding, doPrecondition, Float.NaN, false, 0.5f, 2, 5, 10, 42L);
+        return new IvfSegmentConfig(
+            centroidIndexFormat,
+            quantEncoding,
+            doPrecondition,
+            Float.NaN,
+            false,
+            DEFAULT_ASH_PROJECTED_DIMS_FRACTION,
+            DEFAULT_ASH_BITS_PER_DIM,
+            DEFAULT_ASH_TRAINING_ITERATIONS,
+            DEFAULT_ASH_TRAINING_FACTOR,
+            DEFAULT_ASH_SEED
+        );
     }
 
     /** Convenience constructor for non-ASH configs (uses default ASH params, disabled). */
@@ -64,7 +81,18 @@ public record IvfSegmentConfig(
         boolean usePrecondition,
         float rescoreOversample
     ) {
-        return new IvfSegmentConfig(centroidIndexFormat, quantEncoding, usePrecondition, rescoreOversample, false, 0.5f, 2, 5, 10, 42L);
+        return new IvfSegmentConfig(
+            centroidIndexFormat,
+            quantEncoding,
+            usePrecondition,
+            rescoreOversample,
+            false,
+            DEFAULT_ASH_PROJECTED_DIMS_FRACTION,
+            DEFAULT_ASH_BITS_PER_DIM,
+            DEFAULT_ASH_TRAINING_ITERATIONS,
+            DEFAULT_ASH_TRAINING_FACTOR,
+            DEFAULT_ASH_SEED
+        );
     }
 
     public static IvfSegmentConfig fromCodecDefaultsWithAsh(

@@ -16,6 +16,7 @@ import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.SegmentReader;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -72,11 +73,11 @@ public class IvfQueryConfigResolver {
             mappingUsePrecondition,
             Float.NaN,
             false,
-            0.5f,
-            2,
-            5,
-            10,
-            42L
+            ESNextDiskBBQVectorsFormat.DEFAULT_ASH_PROJECTED_DIMS_FRACTION,
+            ESNextDiskBBQVectorsFormat.DEFAULT_ASH_BITS_PER_DIM,
+            ESNextDiskBBQVectorsFormat.DEFAULT_ASH_TRAINING_ITERATIONS,
+            ESNextDiskBBQVectorsFormat.DEFAULT_ASH_TRAINING_FACTOR,
+            ESNextDiskBBQVectorsFormat.DEFAULT_ASH_SEED
         );
     }
 
@@ -102,11 +103,11 @@ public class IvfQueryConfigResolver {
                 precondition,
                 oversampleFactor,
                 false,
-                0.5f,
-                2,
-                5,
-                10,
-                42L
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_PROJECTED_DIMS_FRACTION,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_BITS_PER_DIM,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_TRAINING_ITERATIONS,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_TRAINING_FACTOR,
+                ESNextDiskBBQVectorsFormat.DEFAULT_ASH_SEED
             );
         }
         return mappingDefaults();
