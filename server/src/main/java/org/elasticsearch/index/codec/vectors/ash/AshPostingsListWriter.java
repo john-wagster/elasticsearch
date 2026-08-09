@@ -25,6 +25,7 @@ import org.elasticsearch.simdvec.AsymmetricHashingScorer;
 import org.elasticsearch.simdvec.ESVectorUtil;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Arrays;
 import java.util.function.IntFunction;
 
@@ -120,7 +121,7 @@ public class AshPostingsListWriter {
             try {
                 return centroidSupplier.centroid(assignments[i]);
             } catch (IOException e) {
-                throw new RuntimeException(e);
+                throw new UncheckedIOException(e);
             }
         };
 
@@ -128,7 +129,7 @@ public class AshPostingsListWriter {
         long t0 = System.currentTimeMillis();
         float[][] w = ashQuantizer.train(vectors, centroidGetter);
         long t1 = System.currentTimeMillis();
-        logger.info("ASH train: {}ms, nDims={}", t1 - t0, w[0].length);
+        logger.debug("ASH train: {}ms, nDims={}", t1 - t0, w[0].length);
 
         // Transpose W once for SIMD-friendly dot products during encoding
         float[][] wT = AsymmetricHashingQuantizer.transposeW(w);
@@ -250,7 +251,7 @@ public class AshPostingsListWriter {
             }
             lengths.add(postingsOutput.getFilePointer() - fileOffset - offset);
         }
-        logger.info("ASH encode (per-posting-list): {}ms", encodeNanos / 1_000_000);
+        logger.debug("ASH encode (per-posting-list): {}ms", encodeNanos / 1_000_000);
 
         if (logger.isDebugEnabled()) {
             printClusterQualityStatistics(assignmentsByCluster);

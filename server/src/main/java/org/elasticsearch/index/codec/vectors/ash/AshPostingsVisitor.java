@@ -103,23 +103,22 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         docEncoding = indexInput.readByte();
         docBase = 0;
 
-        // Approximate centroid dot product derived from quantized centroid scoring.
-        // This avoids reading centroid floats per posting list.
-        centroidDistance = switch (similarityFunction) {
+        // Approximate query·centroid derived from the quantized centroid scoring.
+        // The centroid score is an OSQ-quantized similarity; we invert the similarity transform
+        // to recover an approximate raw dot product. This avoids reading centroid float vectors
+        // per posting list. A future improvement could compute the exact dot product in the
+        // centroid iterator and pass it via PostingMetadata.
+        currentQueryDotCentroid = switch (similarityFunction) {
             case EUCLIDEAN -> ((1 / score) - 1) - centroidToParentSqDist;
             case COSINE, DOT_PRODUCT -> 2 * score - 1;
             case MAXIMUM_INNER_PRODUCT -> score - 1;
         };
-        currentQueryDotCentroid = centroidDistance;
 
         return vectors;
     }
 
-    private float centroidDistance;
-
     @Override
     public int visit(KnnCollector knnCollector) throws IOException {
-        indexInput.seek(indexInput.getFilePointer()); // no-op, position is already correct after reset
         int scoredDocs = 0;
 
         int limit = vectors - BULK_SIZE + 1;

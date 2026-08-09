@@ -38,6 +38,9 @@ import org.apache.lucene.util.packed.PackedLongValues;
 import org.elasticsearch.core.SuppressForbidden;
 import org.elasticsearch.core.WelfordVariance;
 import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
+import org.elasticsearch.index.codec.vectors.ash.AshPostingsListWriter;
+import org.elasticsearch.index.codec.vectors.ash.AshProjectionMatrix;
+import org.elasticsearch.index.codec.vectors.ash.AsymmetricHashingQuantizer;
 import org.elasticsearch.index.codec.vectors.cluster.CentroidOps;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringByteVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringByteVectorValuesSlice;
@@ -107,7 +110,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
     private final boolean useAsh;
 
     // Temporary storage for ASH projection matrix between buildAndWritePostingsLists and writePreconditioner
-    private org.elasticsearch.index.codec.vectors.ash.AshProjectionMatrix pendingAshMatrix;
+    private AshProjectionMatrix pendingAshMatrix;
 
     @Override
     protected boolean supportsByteNative() {
@@ -274,11 +277,11 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
 
         // ASH path: delegate to AshPostingsListWriter for flush
         if (segmentConfig.useAsh()) {
-            var ashWriter = new org.elasticsearch.index.codec.vectors.ash.AshPostingsListWriter();
-            var ashConfig = new org.elasticsearch.index.codec.vectors.ash.AshPostingsListWriter.AshConfig(
+            var ashWriter = new AshPostingsListWriter();
+            var ashConfig = new AshPostingsListWriter.AshConfig(
                 segmentConfig.ashProjectedDimsFraction(),
                 segmentConfig.ashBitsPerDim(),
-                org.elasticsearch.index.codec.vectors.ash.AsymmetricHashingQuantizer.Method.LEARNED,
+                AsymmetricHashingQuantizer.Method.LEARNED,
                 segmentConfig.ashTrainingIterations(),
                 segmentConfig.ashTrainingFactor(),
                 segmentConfig.ashSeed()
@@ -286,7 +289,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             var result = ashWriter.buildAndWrite(
                 fieldInfo,
                 centroidSupplier,
-                (org.apache.lucene.index.FloatVectorValues) vectorValues,
+                (FloatVectorValues) vectorValues,
                 postingsOutput,
                 fileOffset,
                 assignments,
@@ -433,11 +436,11 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
 
         // ASH path: delegate to AshPostingsListWriter for merge
         if (segmentConfig.useAsh()) {
-            var ashWriter = new org.elasticsearch.index.codec.vectors.ash.AshPostingsListWriter();
-            var ashConfig = new org.elasticsearch.index.codec.vectors.ash.AshPostingsListWriter.AshConfig(
+            var ashWriter = new AshPostingsListWriter();
+            var ashConfig = new AshPostingsListWriter.AshConfig(
                 segmentConfig.ashProjectedDimsFraction(),
                 segmentConfig.ashBitsPerDim(),
-                org.elasticsearch.index.codec.vectors.ash.AsymmetricHashingQuantizer.Method.LEARNED,
+                AsymmetricHashingQuantizer.Method.LEARNED,
                 segmentConfig.ashTrainingIterations(),
                 segmentConfig.ashTrainingFactor(),
                 segmentConfig.ashSeed()
@@ -445,7 +448,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             var result = ashWriter.buildAndWrite(
                 fieldInfo,
                 centroidSupplier,
-                (org.apache.lucene.index.FloatVectorValues) vectorValues,
+                (FloatVectorValues) vectorValues,
                 postingsOutput,
                 fileOffset,
                 assignments,
@@ -838,6 +841,9 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         metaOutput.writeByte(byteCentroids ? (byte) 1 : (byte) 0);
         // ASH flag
         metaOutput.writeByte(segmentConfig.useAsh() ? (byte) 1 : (byte) 0);
+        if (segmentConfig.useAsh()) {
+            metaOutput.writeVInt(segmentConfig.ashBitsPerDim());
+        }
     }
 
     @Override

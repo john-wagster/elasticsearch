@@ -17,13 +17,7 @@ package org.elasticsearch.index.codec.vectors.diskbbq;
  * @param queryCentroidOrdinal      The ordinal of the centroid that relates to the query quantization, may be the same as the centroid
  *                                  used for the document, may be different.
  * @param documentCentroidScore     The score of the document postings centroid and the query vector
- * @param queryDotCentroid          Exact dot product of the query with this posting list's centroid (ASH only; NaN if unused)
  */
-public record PostingMetadata(long offset, long length, int queryCentroidOrdinal, float documentCentroidScore, float queryDotCentroid) {
+public record PostingMetadata(long offset, long length, int queryCentroidOrdinal, float documentCentroidScore) {
     public static final int NO_ORDINAL = -1;
-
-    /** Constructor for non-ASH paths that don't need queryDotCentroid. */
-    public PostingMetadata(long offset, long length, int queryCentroidOrdinal, float documentCentroidScore) {
-        this(offset, length, queryCentroidOrdinal, documentCentroidScore, Float.NaN);
-    }
 }
