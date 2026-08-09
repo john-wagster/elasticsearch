@@ -39,7 +39,6 @@ import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
  */
 public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
 
-    private final float[] query;
     private final FieldInfo fieldInfo;
     private final IndexInput indexInput;
     private final Bits acceptDocs;
@@ -48,10 +47,10 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
     private final int packedCodeBytes;
     private final VectorSimilarityFunction similarityFunction;
 
-    // Precomputed query transform: queryTransformed = (query) @ W (centered per posting list at query time)
+    // Precomputed query transform: queryTransformed = query @ W (raw projection, not centered)
     private final float[] queryTransformed;
 
-    // Scratch buffers
+    // Scratch buffers for bulk I/O
     private final DocIdsWriter idsWriter = new DocIdsWriter();
     private final int[] docIdsScratch = new int[BULK_SIZE];
     private final int[] offsetsScratch = new int[BULK_SIZE];
@@ -59,6 +58,7 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
     private final byte[] bulkCodeBuf;
     private final short[] bulkScalesF16 = new short[BULK_SIZE];
     private final short[] bulkOffsetsF16 = new short[BULK_SIZE];
+    // docSums are read for future D2Q4 integer scoring (PR 2); unused in the current scalar path
     private final short[] bulkDocSums = new short[BULK_SIZE];
 
     // Per-posting-list state
@@ -76,7 +76,6 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         Bits acceptDocs,
         int bitsPerDim
     ) {
-        this.query = query;
         this.fieldInfo = fieldInfo;
         this.indexInput = indexInput;
         this.acceptDocs = acceptDocs;

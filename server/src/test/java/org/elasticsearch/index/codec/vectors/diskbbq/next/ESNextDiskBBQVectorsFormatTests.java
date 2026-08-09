@@ -821,4 +821,63 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
         }
     }
 
+    public void testAshAllSimilarityFunctions() throws IOException {
+        int dimensions = 64;
+        int numDocs = 200;
+        ESNextDiskBBQVectorsFormat ashFormat = new ESNextDiskBBQVectorsFormat(
+            QuantEncoding.TWO_BIT_4BIT_QUERY,
+            MIN_VECTORS_PER_CLUSTER,
+            MIN_CENTROIDS_PER_PARENT_CLUSTER,
+            DenseVectorFieldMapper.ElementType.FLOAT,
+            false,
+            null,
+            1,
+            false,
+            DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
+            0,
+            null,
+            IvfFlushConfigSource.empty(),
+            IvfMergeConfigResolver.useCodecDefault(),
+            true
+        );
+        Codec ashCodec = TestUtil.alwaysKnnVectorsFormat(ashFormat);
+        for (VectorSimilarityFunction sim : new VectorSimilarityFunction[] {
+            VectorSimilarityFunction.DOT_PRODUCT,
+            VectorSimilarityFunction.EUCLIDEAN,
+            VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT }) {
+            try (Directory dir = newDirectory()) {
+                IndexWriterConfig iwc = newIndexWriterConfig();
+                iwc.setCodec(ashCodec);
+                try (IndexWriter w = new IndexWriter(dir, iwc)) {
+                    for (int i = 0; i < numDocs; i++) {
+                        Document doc = new Document();
+                        doc.add(new KnnFloatVectorField("f", randomVector(dimensions), sim));
+                        w.addDocument(doc);
+                    }
+                    w.forceMerge(1);
+                    try (IndexReader reader = DirectoryReader.open(w)) {
+                        for (LeafReaderContext ctx : reader.leaves()) {
+                            LeafReader leafReader = ctx.reader();
+                            float[] query = randomVector(dimensions);
+                            TopDocs topDocs = leafReader.searchNearestVectors(
+                                "f",
+                                query,
+                                10,
+                                AcceptDocs.fromLiveDocs(leafReader.getLiveDocs(), leafReader.maxDoc()),
+                                Integer.MAX_VALUE
+                            );
+                            assertThat("similarity=" + sim, topDocs.scoreDocs, arrayWithSize(Math.min(leafReader.maxDoc(), 10)));
+                            for (int i = 0; i < topDocs.scoreDocs.length - 1; i++) {
+                                assertTrue(
+                                    "Scores should be descending for " + sim,
+                                    topDocs.scoreDocs[i].score >= topDocs.scoreDocs[i + 1].score
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 }

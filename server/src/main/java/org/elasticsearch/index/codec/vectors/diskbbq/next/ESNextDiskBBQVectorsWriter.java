@@ -277,6 +277,9 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
 
         // ASH path: delegate to AshPostingsListWriter for flush
         if (segmentConfig.useAsh()) {
+            if (vectorValues instanceof FloatVectorValues == false) {
+                throw new IllegalStateException("ASH requires float vectors, got: " + vectorValues.getClass().getSimpleName());
+            }
             var ashWriter = new AshPostingsListWriter();
             var ashConfig = new AshPostingsListWriter.AshConfig(
                 segmentConfig.ashProjectedDimsFraction(),
@@ -436,6 +439,9 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
 
         // ASH path: delegate to AshPostingsListWriter for merge
         if (segmentConfig.useAsh()) {
+            if (vectorValues instanceof FloatVectorValues == false) {
+                throw new IllegalStateException("ASH requires float vectors, got: " + vectorValues.getClass().getSimpleName());
+            }
             var ashWriter = new AshPostingsListWriter();
             var ashConfig = new AshPostingsListWriter.AshConfig(
                 segmentConfig.ashProjectedDimsFraction(),

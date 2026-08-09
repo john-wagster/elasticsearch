@@ -72,13 +72,6 @@ public class AshPostingsListWriter {
     }
 
     /**
-     * Clears the stored projection matrix (call after writing it to disk).
-     */
-    public void clearProjectionMatrix() {
-        ashProjectionMatrix = null;
-    }
-
-    /**
      * Result of writing posting lists: per-cluster offsets and lengths into the postings file.
      */
     public record PostingsOffsetAndLength(PackedLongValues offsets, PackedLongValues lengths) {}
