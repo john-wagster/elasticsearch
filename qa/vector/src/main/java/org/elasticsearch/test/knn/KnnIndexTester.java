@@ -48,6 +48,7 @@ import org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibration;
 import org.elasticsearch.index.codec.vectors.diskbbq.IvfFlushConfigSource;
 import org.elasticsearch.index.codec.vectors.diskbbq.IvfMergeConfigResolver;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantEncoding;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskASHVectorsFormat;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat;
 import org.elasticsearch.index.codec.vectors.es93.ES93BinaryQuantizedVectorsFormat;
 import org.elasticsearch.index.codec.vectors.es93.ES93FlatVectorFormat;
@@ -251,16 +252,22 @@ public class KnnIndexTester {
         format = switch (args.indexType()) {
             case IVF -> {
                 boolean isAsh = "ash".equals(args.quantizationType());
-                var encoding = isAsh
-                    ? QuantEncoding.TWO_BIT_4BIT_QUERY
-                    : resolveQuantEncoding(quantizeBits, args.queryQuantizeBits());
-                boolean doPrecondition = isAsh ? false : args.doPrecondition();
+                if (isAsh) {
+                    yield new ESNextDiskASHVectorsFormat(
+                        args.ivfClusterSize(),
+                        args.secondaryClusterSize() == -1
+                            ? ESNextDiskASHVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER
+                            : args.secondaryClusterSize(),
+                        args.datasetConfig().isSliced() ? KnnIndexer.PARTITION_ID_FIELD : null
+                    );
+                }
+                var encoding = resolveQuantEncoding(quantizeBits, args.queryQuantizeBits());
                 // Use flatVectorThreshold from config, or default to -1 (dynamic) if not specified
                 int flatVectorThreshold = args.flatVectorThreshold() >= 0 ? args.flatVectorThreshold() : -1;
                 IvfMergeConfigResolver mergeConfigResolver = args.autoCalibrate()
                     ? IvfAutoCalibration.mergeConfigResolver(args.ivfClusterSize())
                     : IvfMergeConfigResolver.useCodecDefault();
-                var baseFormat = new ESNextDiskBBQVectorsFormat(
+                yield new ESNextDiskBBQVectorsFormat(
                     encoding,
                     args.ivfClusterSize(),
                     args.secondaryClusterSize() == -1
@@ -270,14 +277,13 @@ public class KnnIndexTester {
                     args.onDiskRescore(),
                     exec,
                     mergeWorkers,
-                    doPrecondition,
+                    args.doPrecondition(),
                     args.preconditioningBlockDims(),
                     flatVectorThreshold,
                     args.datasetConfig().isSliced() ? KnnIndexer.PARTITION_ID_FIELD : null,
                     IvfFlushConfigSource.empty(),
                     mergeConfigResolver
                 );
-                yield isAsh ? baseFormat.withAshEnabled() : baseFormat;
             }
             case GPU_HNSW -> {
                 int graphDegree = ES92GpuHnswVectorsFormat.cagraGraphDegree(args.hnswM());
