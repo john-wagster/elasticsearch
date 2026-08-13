@@ -2951,8 +2951,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                     flatIndexThreshold,
                     sliceField,
                     IvfFlushConfigSource.empty(),
-                    mergeConfigResolver,
-                    Build.current().isSnapshot()
+                    mergeConfigResolver
                 );
             } else if (indexVersionCreated.onOrAfter(IndexVersions.DISK_BBQ_ES950_AUTO_CALIBRATE)) {
                 IvfMergeConfigResolver mergeConfigResolver = autoCalibrate
