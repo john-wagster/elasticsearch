@@ -89,8 +89,7 @@ public final class ESNextRescoreOversampleTestFixture {
                 defaultFlatThreshold(vpc),
                 null,
                 flushConfig,
-                mergeResolver,
-                false
+                mergeResolver
             )
         );
     }

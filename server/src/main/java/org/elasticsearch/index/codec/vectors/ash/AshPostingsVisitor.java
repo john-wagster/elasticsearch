@@ -9,11 +9,13 @@
 
 package org.elasticsearch.index.codec.vectors.ash;
 
-import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.KnnCollector;
 import org.apache.lucene.store.IndexInput;
+import org.apache.lucene.util.BitUtil;
 import org.apache.lucene.util.Bits;
+import org.apache.lucene.util.VectorUtil;
+import org.elasticsearch.common.CheckedIntFunction;
 import org.elasticsearch.index.codec.vectors.diskbbq.DocIdsWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader;
 import org.elasticsearch.index.codec.vectors.diskbbq.PostingMetadata;
@@ -28,27 +30,66 @@ import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
 /**
  * PostingVisitor for ASH-encoded posting lists.
  * <p>
- * Reads bit-packed 2-bit codes with float16 scale/offset per vector and scores them
+ * Reads bit-packed codes with float32 scale/offset per vector and scores them
  * asymmetrically using the precomputed query transform. The on-disk format per block is:
  * <pre>
  *   [docIds][packed_codes × blockSize][scales × blockSize][offsets × blockSize][docSums × blockSize]
  * </pre>
+ * For EUCLIDEAN similarity, each block additionally contains:
+ * <pre>
+ *   [vecCentroidDots × blockSize][vecCentroidSqDists × blockSize]
+ * </pre>
  * <p>
- * This initial implementation uses scalar scoring via {@link AsymmetricHashingScorer#score}.
- * SIMD-accelerated bulk scoring (ipFloatBit, D2Q4) will be added in a follow-up.
+ * Two scoring paths are supported:
+ * <ul>
+ *   <li>Float path ({@code queryBitsPerDim == 0}): full-precision projected query × packed document codes</li>
+ *   <li>Integer path ({@code queryBitsPerDim > 0}): query quantized to {@code queryBitsPerDim} bits,
+ *       scored via AND+popcount with per-vector docSum correction</li>
+ * </ul>
+ * <p>
+ * EUCLIDEAN scoring implements the ASH paper Appendix A (Eq. A.2):
+ * <pre>
+ *   ‖q - x‖² = ‖q - μ*‖² + ‖x - μ*‖² - 2·(⟨q,x⟩ - ⟨μ*,x⟩ - ⟨q,μ*⟩ + ‖μ*‖²)
+ * </pre>
  */
 public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
 
-    private final FieldInfo fieldInfo;
+    /** Strategy for computing the approximate dot product from packed codes. */
+    @FunctionalInterface
+    private interface DotProductScorer {
+        float score(byte[] packedCodes, int codeOffset, byte[] corrections, int correctionOffset);
+    }
+
+    /** Strategy for converting a raw dot product into a Lucene similarity score. */
+    @FunctionalInterface
+    private interface SimilarityConverter {
+        float convert(float approxDotProduct, byte[] corrections, int correctionOffset);
+    }
+
     private final IndexInput indexInput;
     private final Bits acceptDocs;
     private final int nDims;
     private final int bitsPerDim;
     private final int packedCodeBytes;
+    private final int planeBytes;
     private final VectorSimilarityFunction similarityFunction;
+
+    // Raw query vector — retained for exact centroid dot products at query time
+    private final float[] query;
+
+    // Centroid lookup: ordinal → float[] centroid vector (reads from centroid file)
+    private final CheckedIntFunction<float[], IOException> centroidReader;
 
     // Precomputed query transform: queryTransformed = query @ W (raw projection, not centered)
     private final float[] queryTransformed;
+
+    // Scoring strategy: float or integer path, selected once at construction time
+    private final DotProductScorer dotProductScorer;
+    // Similarity conversion strategy: selected once at construction time
+    private final SimilarityConverter similarityConverter;
+    // Pre-allocated query constants array: [queryDotCentroid, invQScale, qOffset, constantCorrection]
+    // queryDotCentroid is set per-cluster in resetPostingsScorer; the rest are set once in constructor.
+    private final float[] queryConstants;
 
     // Scratch buffers for bulk I/O
     private final DocIdsWriter idsWriter = new DocIdsWriter();
@@ -56,62 +97,158 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
     private final int[] offsetsScratch = new int[BULK_SIZE];
     private final float[] scores = new float[BULK_SIZE];
     private final byte[] bulkCodeBuf;
-    private final short[] bulkScalesF16 = new short[BULK_SIZE];
-    private final short[] bulkOffsetsF16 = new short[BULK_SIZE];
-    // docSums are read for future D2Q4 integer scoring (PR 2); unused in the current scalar path
-    private final short[] bulkDocSums = new short[BULK_SIZE];
+    // Per-vector corrections in AoS layout: [scale, offset, docSum, vecCentroidDot, vecCentroidSqDist] × blockSize
+    private final byte[] bulkCorrectionsBuf = new byte[BULK_SIZE * AsymmetricHashingScorer.CORRECTION_BYTES];
 
     // Per-posting-list state
     private int vectors;
     private byte docEncoding;
     private int docBase;
     private float currentQueryDotCentroid;
+    // EUCLIDEAN per-posting-list state (Appendix A, Eq. A.2)
+    private float currentQueryCentroidSqDist;
+    private float currentCentroidNormSq;
 
+    /**
+     * @param wT transposed projection matrix W^T in row-major order, shape (nDims, originalDim)
+     * @param originalDim original vector dimensionality (number of columns in wT)
+     * @param query the raw query vector
+     * @param similarityFunction the vector similarity function for score conversion
+     * @param indexInput input for reading posting list data
+     * @param acceptDocs live docs filter
+     * @param bitsPerDim bits per dimension for document codes
+     * @param queryBitsPerDim bits per dimension for query quantization (0 for float path)
+     * @param centroidReader function mapping centroid ordinal to float[] centroid vector
+     */
     public AshPostingsVisitor(
-        float[][] w,
-        float[][] wT,
+        float[] wT,
+        int originalDim,
         float[] query,
-        FieldInfo fieldInfo,
+        VectorSimilarityFunction similarityFunction,
         IndexInput indexInput,
         Bits acceptDocs,
-        int bitsPerDim
+        int bitsPerDim,
+        int queryBitsPerDim,
+        CheckedIntFunction<float[], IOException> centroidReader
     ) {
-        this.fieldInfo = fieldInfo;
         this.indexInput = indexInput;
         this.acceptDocs = acceptDocs;
-        this.nDims = w[0].length;
+        this.nDims = wT.length / originalDim;
         this.bitsPerDim = bitsPerDim;
-        this.packedCodeBytes = AsymmetricHashingScorer.packedLength(nDims, bitsPerDim);
-        this.similarityFunction = fieldInfo.getVectorSimilarityFunction();
+        this.planeBytes = (nDims + 7) >>> 3;
+        this.packedCodeBytes = bitsPerDim * planeBytes;
+        this.similarityFunction = similarityFunction;
+        this.query = query;
+        this.centroidReader = centroidReader;
 
-        // Precompute query projection: queryTransformed[j] = dot(query, wT[j])
+        // Precompute query projection: queryTransformed[j] = dot(query, wT[j*originalDim .. (j+1)*originalDim))
         this.queryTransformed = new float[nDims];
         for (int j = 0; j < nDims; j++) {
-            queryTransformed[j] = ESVectorUtil.dotProduct(query, wT[j]);
+            queryTransformed[j] = ESVectorUtil.dotProduct(query, 0, wT, j * originalDim, originalDim);
         }
+
+        // Shared query constants array used by both float and integer scoring paths
+        this.queryConstants = new float[AsymmetricHashingScorer.QC_LENGTH];
+
+        // Integer scoring setup: quantize projected query to queryBitsPerDim bits
+        if (queryBitsPerDim > 0) {
+            float qMin = Float.MAX_VALUE, qMax = -Float.MAX_VALUE;
+            for (int j = 0; j < nDims; j++) {
+                qMin = Math.min(qMin, queryTransformed[j]);
+                qMax = Math.max(qMax, queryTransformed[j]);
+            }
+            float range = qMax - qMin;
+            int numQueryLevels = 1 << queryBitsPerDim;
+            float qScale = range > 0 ? (numQueryLevels - 1) / range : 1.0f;
+            float invQScale = range > 0 ? range / (numQueryLevels - 1) : 0f;
+
+            byte[] queryQuantized = new byte[queryBitsPerDim * planeBytes];
+            int unsignedSum = 0;
+            for (int j = 0; j < nDims; j++) {
+                int level = Math.clamp(Math.round((queryTransformed[j] - qMin) * qScale), 0, numQueryLevels - 1);
+                unsignedSum += level;
+                int byteIdx = j >>> 3;
+                int bitIdx = 7 - (j & 7);
+                for (int p = 0; p < queryBitsPerDim; p++) {
+                    if (((level >> p) & 1) != 0) {
+                        queryQuantized[p * planeBytes + byteIdx] |= (byte) (1 << bitIdx);
+                    }
+                }
+            }
+            // constantCorrection accounts for the centering bias when using unsigned integer scoring:
+            // dot(qt_float, centeredCode) = dot(qt_float, unsignedCode) - centerOffset * sum(qt_float)
+            // The sum(qt_float) term ≈ invQScale * unsignedQuerySum + qOffset * nDims, precomputed here.
+            float centerOffset = ((1 << bitsPerDim) - 1) / 2.0f;
+            float constantCorrection = centerOffset * (unsignedSum * invQScale + qMin * nDims);
+            // queryDotCentroid (index 0) is set per-cluster in resetPostingsScorer
+            queryConstants[AsymmetricHashingScorer.QC_INV_Q_SCALE] = invQScale;
+            queryConstants[AsymmetricHashingScorer.QC_Q_OFFSET] = qMin;
+            queryConstants[AsymmetricHashingScorer.QC_CONSTANT_CORRECTION] = constantCorrection;
+            final int qBits = queryBitsPerDim;
+            this.dotProductScorer = (packedCodes, codeOffset, corr, corrOff) -> AsymmetricHashingScorer.scoreInteger(
+                queryQuantized,
+                qBits,
+                queryConstants,
+                packedCodes,
+                codeOffset,
+                bitsPerDim,
+                planeBytes,
+                corr,
+                corrOff
+            );
+        } else {
+            this.dotProductScorer = (packedCodes, codeOffset, corr, corrOff) -> AsymmetricHashingScorer.score(
+                queryTransformed,
+                queryConstants,
+                packedCodes,
+                codeOffset,
+                nDims,
+                bitsPerDim,
+                corr,
+                corrOff
+            );
+        }
+
+        // Similarity conversion strategy
+        this.similarityConverter = switch (similarityFunction) {
+            case EUCLIDEAN -> (dot, corr, corrOff) -> {
+                float vecCentroidDot = Float.intBitsToFloat(
+                    (int) BitUtil.VH_LE_INT.get(corr, corrOff + AsymmetricHashingScorer.CORR_VEC_CENTROID_DOT)
+                );
+                float vecCentroidSqDist = Float.intBitsToFloat(
+                    (int) BitUtil.VH_LE_INT.get(corr, corrOff + AsymmetricHashingScorer.CORR_VEC_CENTROID_SQ_DIST)
+                );
+                float sqDist = currentQueryCentroidSqDist + vecCentroidSqDist - 2 * (dot - vecCentroidDot - currentQueryDotCentroid
+                    + currentCentroidNormSq);
+                return 1 / (1 + Math.max(0, sqDist));
+            };
+            case COSINE, DOT_PRODUCT -> (dot, corr, corrOff) -> VectorUtil.normalizeToUnitInterval(dot);
+            case MAXIMUM_INNER_PRODUCT -> (dot, corr, corrOff) -> VectorUtil.scaleMaxInnerProductScore(dot);
+        };
 
         this.bulkCodeBuf = new byte[BULK_SIZE * packedCodeBytes];
     }
 
     @Override
     public int resetPostingsScorer(PostingMetadata metadata) throws IOException {
-        float score = metadata.documentCentroidScore();
         indexInput.seek(metadata.offset());
-        float centroidToParentSqDist = Float.intBitsToFloat(indexInput.readInt());
         vectors = indexInput.readVInt();
+        int centroidOrd = indexInput.readVInt();
+
+        // Compute exact query·centroid dot product from the real centroid vector
+        float[] centroid = centroidReader.apply(centroidOrd);
+        currentQueryDotCentroid = ESVectorUtil.dotProduct(query, centroid);
+
+        // Read centroid norm squared from header; compute ‖q-μ*‖² for EUCLIDEAN
+        currentCentroidNormSq = Float.intBitsToFloat(indexInput.readInt());
+        if (similarityFunction == VectorSimilarityFunction.EUCLIDEAN) {
+            currentQueryCentroidSqDist = ESVectorUtil.squareDistance(query, centroid);
+        }
+
         docEncoding = indexInput.readByte();
         docBase = 0;
 
-        // Approximate query·centroid derived from the quantized centroid scoring.
-        // The centroid score is an OSQ-quantized similarity; we invert the similarity transform
-        // to recover an approximate raw dot product. This avoids reading centroid float vectors
-        // per posting list. A future improvement could compute the exact dot product in the
-        // centroid iterator and pass it via PostingMetadata.
-        currentQueryDotCentroid = switch (similarityFunction) {
-            case EUCLIDEAN -> ((1 / score) - 1) - centroidToParentSqDist;
-            case COSINE, DOT_PRODUCT -> 2 * score - 1;
-            case MAXIMUM_INNER_PRODUCT -> score - 1;
-        };
+        queryConstants[AsymmetricHashingScorer.QC_QUERY_DOT_CENTROID] = currentQueryDotCentroid;
 
         return vectors;
     }
@@ -140,40 +277,23 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         readDocIds(blockSize);
         int docsToScore = filterAcceptedDocs(blockSize);
         if (docsToScore == 0) {
-            // Skip the entire block
-            indexInput.skipBytes((long) blockSize * packedCodeBytes + (long) blockSize * Short.BYTES * 3);
+            // Skip the entire block: codes + corrections
+            long bytesToSkip = (long) blockSize * packedCodeBytes + (long) blockSize * AsymmetricHashingScorer.CORRECTION_BYTES;
+            indexInput.skipBytes(bytesToSkip);
             return 0;
         }
 
-        // Read structure-of-arrays: codes, scales, offsets, docSums
+        // Read codes and corrections (unified AoS layout for all similarity functions)
         indexInput.readBytes(bulkCodeBuf, 0, blockSize * packedCodeBytes);
-        for (int j = 0; j < blockSize; j++) {
-            bulkScalesF16[j] = indexInput.readShort();
-        }
-        for (int j = 0; j < blockSize; j++) {
-            bulkOffsetsF16[j] = indexInput.readShort();
-        }
-        for (int j = 0; j < blockSize; j++) {
-            bulkDocSums[j] = indexInput.readShort();
-        }
+        indexInput.readBytes(bulkCorrectionsBuf, 0, blockSize * AsymmetricHashingScorer.CORRECTION_BYTES);
 
-        // Score each vector using scalar multi-bit scorer
+        // Score each vector
         float maxScore = Float.NEGATIVE_INFINITY;
         for (int j = 0; j < blockSize; j++) {
             if (docIdsScratch[j] != -1) {
-                float scale = Float.float16ToFloat(bulkScalesF16[j]);
-                float offset = Float.float16ToFloat(bulkOffsetsF16[j]);
-                float rawScore = AsymmetricHashingScorer.score(
-                    queryTransformed,
-                    currentQueryDotCentroid,
-                    bulkCodeBuf,
-                    j * packedCodeBytes,
-                    nDims,
-                    bitsPerDim,
-                    scale,
-                    offset
-                );
-                scores[j] = convertScore(rawScore);
+                int corrOff = j * AsymmetricHashingScorer.CORRECTION_BYTES;
+                float approxDotProduct = dotProductScorer.score(bulkCodeBuf, j * packedCodeBytes, bulkCorrectionsBuf, corrOff);
+                scores[j] = similarityConverter.convert(approxDotProduct, bulkCorrectionsBuf, corrOff);
                 if (scores[j] > maxScore) {
                     maxScore = scores[j];
                 }
@@ -184,14 +304,6 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
             collectBulk(knnCollector, blockSize, docsToScore, maxScore);
         }
         return docsToScore;
-    }
-
-    private float convertScore(float rawDotProduct) {
-        return switch (similarityFunction) {
-            case EUCLIDEAN -> 1 / (1 + rawDotProduct);
-            case COSINE, DOT_PRODUCT -> (1 + rawDotProduct) / 2;
-            case MAXIMUM_INNER_PRODUCT -> rawDotProduct >= 0 ? rawDotProduct + 1 : 1 / (1 - rawDotProduct);
-        };
     }
 
     private void readDocIds(int count) throws IOException {
