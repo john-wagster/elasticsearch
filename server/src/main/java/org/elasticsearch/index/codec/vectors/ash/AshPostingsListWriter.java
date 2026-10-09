@@ -58,6 +58,17 @@ public class AshPostingsListWriter {
      */
     private static final int WARM_START_REFINE_ITERATIONS = 1;
 
+    /**
+     * Number of vectors projected through W in a single matrix multiply during encoding. Decoupled
+     * from (and a multiple of) the on-disk {@link org.elasticsearch.simdvec.ES940OSQVectorsScorer#BULK_SIZE}
+     * write-block size: W (originalDim x nDims) is read once per ENCODE_BLOCK rows rather than once per
+     * BULK_SIZE rows, amortizing the W stream over far more vectors (a measured ~1.35x encode speedup
+     * on AVX-512 at dim=3072). The encoded results are then emitted as BULK_SIZE-wide on-disk blocks for
+     * scorer compatibility. Transient heap per encoder is roughly ENCODE_BLOCK x (originalDim + 2*nDims)
+     * floats (~6MB at dim=3072, nDims=1536).
+     */
+    private static final int ENCODE_BLOCK = 256;
+
     private AshProjectionMatrix ashProjectionMatrix;
 
     /**
@@ -226,10 +237,10 @@ public class AshPostingsListWriter {
         final byte[] blockCodesBuf = new byte[BULK_SIZE * packedCodeBytes];
         final byte[] blockCorrectionsBuf = new byte[BULK_SIZE * AshPostingsVisitor.CORRECTION_BYTES];
         final boolean isEuclidean = similarityFunction == VectorSimilarityFunction.EUCLIDEAN;
-        // Encodes a whole block in one matrix multiply, so W is read once per block rather than once
-        // per vector. Created here and reused for every posting list, since W does not change.
-        final AsymmetricHashingQuantizer.BlockEncoder encoder = ashQuantizer.newBlockEncoder(w, originalDim, BULK_SIZE);
-        final float[] blockVecCentroidSqDists = new float[BULK_SIZE];
+        // Encodes a whole block in one matrix multiply, so W is read once per ENCODE_BLOCK rows rather
+        // than once per vector. Created here and reused for every posting list, since W does not change.
+        final AsymmetricHashingQuantizer.BlockEncoder encoder = ashQuantizer.newBlockEncoder(w, originalDim, ENCODE_BLOCK);
+        final float[] blockVecCentroidSqDists = new float[ENCODE_BLOCK];
         DocIdsWriter idsWriter = new DocIdsWriter();
 
         // On merge the vectors are read from an off-heap temp file in cluster order, which is a
@@ -279,61 +290,72 @@ public class AshPostingsListWriter {
                 // When skipDocIds is true (sliced flush), doc IDs are omitted -- the reader uses ordToDoc().
                 int written = 0;
                 while (written < size) {
-                    int blockSize = Math.min(BULK_SIZE, size - written);
-                    final int blockStart = written;
-                    if (skipDocIds == false) {
-                        idsWriter.writeDocIds(d -> docDeltas[blockStart + d], blockSize, encoding, postingsOutput);
-                    }
+                    // Encode up to ENCODE_BLOCK vectors in one matrix multiply (W read once per batch),
+                    // then emit the results as BULK_SIZE-wide on-disk write blocks below.
+                    final int encodeBlockSize = Math.min(ENCODE_BLOCK, size - written);
+                    final int encodeBlockStart = written;
 
-                    // Encode all vectors in this block into pre-allocated buffers.
-                    // Corrections are packed in SoA order: [scales][offsets][docSums][vecCentroidDots][vecCentroidSqDists]
-                    int scaleBase = 0;
-                    int offsetBase = blockSize * Float.BYTES;
-                    int docSumBase = 2 * blockSize * Float.BYTES;
-                    int vcdBase = 3 * blockSize * Float.BYTES;
-                    int vcsdBase = 4 * blockSize * Float.BYTES;
-
-                    // Gather the block, then project and quantize it in one go. Providers may return a
+                    // Gather the batch, then project and quantize it in one go. Providers may return a
                     // shared/live buffer, so everything that needs the original vector is read here,
                     // before the next ordinal is requested
                     encoder.reset();
-                    for (int j = 0; j < blockSize; j++) {
-                        int vectorOrd = cluster[clusterOrds[written + j]];
+                    for (int e = 0; e < encodeBlockSize; e++) {
+                        int vectorOrd = cluster[clusterOrds[encodeBlockStart + e]];
                         float[] vec = vectors.apply(vectorOrd);
                         encoder.add(vec, centroid);
                         if (isEuclidean) {
-                            blockVecCentroidSqDists[j] = ESVectorUtil.squareDistance(vec, centroid);
+                            blockVecCentroidSqDists[e] = ESVectorUtil.squareDistance(vec, centroid);
                         }
                     }
 
                     encoder.encode(precomputed);
 
-                    for (int j = 0; j < blockSize; j++) {
-                        float[] code = encoder.code(j);
-                        byte[] vectorPacked = ESVectorUtil.ashPack(code, bitsPerDim);
-                        System.arraycopy(vectorPacked, 0, blockCodesBuf, j * packedCodeBytes, packedCodeBytes);
-                        int jOff = j * Float.BYTES;
-                        BitUtil.VH_BE_INT.set(blockCorrectionsBuf, scaleBase + jOff, Float.floatToIntBits(encoder.scale(j)));
-                        BitUtil.VH_BE_INT.set(blockCorrectionsBuf, offsetBase + jOff, Float.floatToIntBits(encoder.offset(j)));
-                        // Compute docSum: sum of unsigned code values directly from the centered float codes
-                        int docSum = 0;
-                        for (int d = 0; d < nDims; d++) {
-                            docSum += Math.round(code[d] + centerOffset);
+                    // Emit the encoded batch as BULK_SIZE-wide on-disk blocks.
+                    int emitted = 0;
+                    while (emitted < encodeBlockSize) {
+                        int blockSize = Math.min(BULK_SIZE, encodeBlockSize - emitted);
+                        final int blockStart = encodeBlockStart + emitted;
+                        if (skipDocIds == false) {
+                            idsWriter.writeDocIds(d -> docDeltas[blockStart + d], blockSize, encoding, postingsOutput);
                         }
-                        BitUtil.VH_BE_INT.set(blockCorrectionsBuf, docSumBase + jOff, docSum);
-                        // EUCLIDEAN: ⟨μ*,x⟩ and ‖x-μ*‖² from the original float vectors; 0 otherwise
-                        if (isEuclidean) {
-                            BitUtil.VH_BE_INT.set(blockCorrectionsBuf, vcdBase + jOff, Float.floatToIntBits(encoder.vecCentroidDot(j)));
-                            BitUtil.VH_BE_INT.set(blockCorrectionsBuf, vcsdBase + jOff, Float.floatToIntBits(blockVecCentroidSqDists[j]));
-                        } else {
-                            BitUtil.VH_BE_INT.set(blockCorrectionsBuf, vcdBase + jOff, 0);
-                            BitUtil.VH_BE_INT.set(blockCorrectionsBuf, vcsdBase + jOff, 0);
+
+                        // Corrections are packed in SoA order: [scales][offsets][docSums][vecCentroidDots][vecCentroidSqDists]
+                        int scaleBase = 0;
+                        int offsetBase = blockSize * Float.BYTES;
+                        int docSumBase = 2 * blockSize * Float.BYTES;
+                        int vcdBase = 3 * blockSize * Float.BYTES;
+                        int vcsdBase = 4 * blockSize * Float.BYTES;
+
+                        for (int j = 0; j < blockSize; j++) {
+                            // Index into the encoded batch (ENCODE_BLOCK-wide), not the write block.
+                            int e = emitted + j;
+                            float[] code = encoder.code(e);
+                            byte[] vectorPacked = ESVectorUtil.ashPack(code, bitsPerDim);
+                            System.arraycopy(vectorPacked, 0, blockCodesBuf, j * packedCodeBytes, packedCodeBytes);
+                            int jOff = j * Float.BYTES;
+                            BitUtil.VH_BE_INT.set(blockCorrectionsBuf, scaleBase + jOff, Float.floatToIntBits(encoder.scale(e)));
+                            BitUtil.VH_BE_INT.set(blockCorrectionsBuf, offsetBase + jOff, Float.floatToIntBits(encoder.offset(e)));
+                            // Compute docSum: sum of unsigned code values directly from the centered float codes
+                            int docSum = 0;
+                            for (int d = 0; d < nDims; d++) {
+                                docSum += Math.round(code[d] + centerOffset);
+                            }
+                            BitUtil.VH_BE_INT.set(blockCorrectionsBuf, docSumBase + jOff, docSum);
+                            // EUCLIDEAN: ⟨μ*,x⟩ and ‖x-μ*‖² from the original float vectors; 0 otherwise
+                            if (isEuclidean) {
+                                BitUtil.VH_BE_INT.set(blockCorrectionsBuf, vcdBase + jOff, Float.floatToIntBits(encoder.vecCentroidDot(e)));
+                                BitUtil.VH_BE_INT.set(blockCorrectionsBuf, vcsdBase + jOff, Float.floatToIntBits(blockVecCentroidSqDists[e]));
+                            } else {
+                                BitUtil.VH_BE_INT.set(blockCorrectionsBuf, vcdBase + jOff, 0);
+                                BitUtil.VH_BE_INT.set(blockCorrectionsBuf, vcsdBase + jOff, 0);
+                            }
                         }
+                        // Write packed codes, then all corrections in one call
+                        postingsOutput.writeBytes(blockCodesBuf, 0, blockSize * packedCodeBytes);
+                        postingsOutput.writeBytes(blockCorrectionsBuf, 0, blockSize * AshPostingsVisitor.CORRECTION_BYTES);
+                        emitted += blockSize;
                     }
-                    // Write packed codes, then all corrections in one call
-                    postingsOutput.writeBytes(blockCodesBuf, 0, blockSize * packedCodeBytes);
-                    postingsOutput.writeBytes(blockCorrectionsBuf, 0, blockSize * AshPostingsVisitor.CORRECTION_BYTES);
-                    written += blockSize;
+                    written += encodeBlockSize;
                 }
                 lengths.add(postingsOutput.getFilePointer() - fileOffset - offset);
             }

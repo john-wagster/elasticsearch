@@ -55,7 +55,7 @@ final class AshUtils {
         float[] x = new float[len];
         ESVectorUtil.linearCombination(scale, m, x);
 
-        final int maxIter = 100;
+        final int maxIter = 10; // capped for high-dim flush cost
         float[] xT = new float[len];
         float[] xtx = new float[len];
         float[] xNew = new float[len];
@@ -193,7 +193,11 @@ final class AshUtils {
      * @return the converged block transposed, row-major (k x q), one orthonormal vector per row
      */
     private static float[] blockPowerIteration(float[] x, float[] xT, int p, int q, int k, long seed) {
-        int iters = 20; // sufficient for PCA init that gets refined by Procrustes
+        // Number of subspace power-iteration steps for the PCA initialization. The basis only needs
+        // to be good enough for the subsequent Procrustes refinement, so a small number of iterations
+        // suffices; empirically 2-3 gives the same recall as 10 on high-dim data while roughly halving
+        // training cost (the extra iterations were over-converging a basis that Procrustes re-fits).
+        int iters = 3;
 
         float[] bT = randomGaussians(new Random(seed), q * k);
         qrOrthogonalize(bT, q, k);

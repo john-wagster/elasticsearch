@@ -64,7 +64,7 @@ public record IvfSegmentConfig(
         public static final float DEFAULT_PROJECTED_DIMS_FRACTION = 0.5f;
         public static final int DEFAULT_BITS_PER_DIM = 2;
         public static final int DEFAULT_QUERY_BITS_PER_DIM = 4;
-        public static final int DEFAULT_TRAINING_ITERATIONS = 5;
+        public static final int DEFAULT_TRAINING_ITERATIONS = 0;
         public static final int DEFAULT_TRAINING_FACTOR = 10;
 
         /**

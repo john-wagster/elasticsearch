@@ -18,10 +18,24 @@ import org.elasticsearch.simdvec.MultiVectorsSource;
 import org.elasticsearch.simdvec.SimdVecLibrary;
 
 import java.lang.foreign.MemorySegment;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public final class Native22ESVectorUtilSupport extends PanamaESVectorUtilSupport {
 
     private static final SimdVecLibrary DISTANCE_FUNCS = SimdVecLibrary.instance().orElseThrow(AssertionError::new);
+
+    // Optional thread pool to parallelise the native GEMM across output row-bands. The native
+    // kernel computes disjoint C rows from disjoint A rows (sharing B read-only), so splitting by
+    // rows is embarrassingly parallel with no coordination. Driven by -Dbench.matmul.threads=N
+    // (N<=1 or unset => single-threaded). Benchmark scope; a production version would use an
+    // ES-managed executor rather than a private pool.
+    private static final int MM_THREADS = Integer.getInteger("bench.matmul.threads", 1);
+    private static final int MM_MIN_PARALLEL_ROWS = 64;
+    private static final ExecutorService MM_POOL = MM_THREADS > 1 ? Executors.newFixedThreadPool(MM_THREADS) : null;
 
     /*
      * This is technically separate to the Panama22 implementation, but there's
@@ -32,6 +46,47 @@ public final class Native22ESVectorUtilSupport extends PanamaESVectorUtilSupport
     @Override
     public float dotProduct(float[] a, float[] b) {
         return DISTANCE_FUNCS.dotProductF32(MemorySegment.ofArray(a), MemorySegment.ofArray(b), a.length);
+    }
+
+    @Override
+    public void matrixMultiply(float[] a, float[] b, int m, int k, int n, float[] result) {
+        // Native single-precision GEMM: C(m x n) = A(m x k) * B(k x n), all row-major.
+        // Heap arrays are passed zero-copy via MemorySegment.ofArray; the @Critical binding
+        // pins them for the duration of the call.
+        if (MM_POOL == null || m < MM_MIN_PARALLEL_ROWS) {
+            DISTANCE_FUNCS.sgemmF32(
+                MemorySegment.ofArray(a),
+                MemorySegment.ofArray(b),
+                MemorySegment.ofArray(result),
+                m,
+                k,
+                n
+            );
+            return;
+        }
+        // Split the output rows into bands, one task per band. Bands are disjoint and B is shared.
+        int bands = Math.min(m, MM_THREADS);
+        int rowsPerBand = (m + bands - 1) / bands;
+        MemorySegment as = MemorySegment.ofArray(a);
+        MemorySegment bs = MemorySegment.ofArray(b);
+        MemorySegment cs = MemorySegment.ofArray(result);
+        List<Future<?>> futures = new ArrayList<>(bands);
+        for (int r0 = 0; r0 < m; r0 += rowsPerBand) {
+            final int rowStart = r0;
+            final int mb = Math.min(rowsPerBand, m - r0);
+            futures.add(MM_POOL.submit(() -> {
+                MemorySegment aBand = as.asSlice((long) rowStart * k * Float.BYTES, (long) mb * k * Float.BYTES);
+                MemorySegment cBand = cs.asSlice((long) rowStart * n * Float.BYTES, (long) mb * n * Float.BYTES);
+                DISTANCE_FUNCS.sgemmF32(aBand, bs, cBand, mb, k, n);
+            }));
+        }
+        for (Future<?> f : futures) {
+            try {
+                f.get();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }
     }
 
     @Override

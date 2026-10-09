@@ -568,6 +568,18 @@ public abstract class SimdVecLibrary {
         int length
     );
 
+    // Single-precision matrix multiply C = A(m x k) * B(k x n), all row-major.
+    @Function("vec_sgemmf32")
+    @Critical(fallbackAdapter = Critical.UnsupportedFallback.class)
+    public abstract void sgemmF32(
+        @MatrixSegment(rowsParam = "m", colsParam = "k", elementBits = Float.SIZE) MemorySegment a,
+        @MatrixSegment(rowsParam = "k", colsParam = "n", elementBits = Float.SIZE) MemorySegment b,
+        @MatrixSegment(rowsParam = "m", colsParam = "n", elementBits = Float.SIZE) MemorySegment c,
+        int m,
+        int k,
+        int n
+    );
+
     @Function("vec_dotf32_bulk")
     @Critical(fallbackAdapter = Critical.UnsupportedFallback.class)
     public abstract void dotProductF32Bulk(
