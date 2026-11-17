@@ -31,6 +31,7 @@ import org.elasticsearch.logging.Logger;
 import org.elasticsearch.simdvec.ESVectorUtil;
 
 import java.io.IOException;
+import java.util.function.UnaryOperator;
 
 import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
 
@@ -109,6 +110,54 @@ public class AshPostingsListWriter {
         AshProjectionMatrix inherited,
         boolean useMergeTrainingFactor
     ) throws IOException {
+        return buildAndWrite(
+            fieldInfo,
+            centroidSupplier,
+            floatVectorValues,
+            postingsOutput,
+            fileOffset,
+            assignments,
+            overspillAssignments,
+            ashConfig,
+            quantizerExec,
+            similarityFunction,
+            skipDocIds,
+            null,
+            null,
+            inherited,
+            useMergeTrainingFactor
+        );
+    }
+
+    /**
+     * Trains ASH, or reuses a shared projection, encodes vectors, and writes posting lists to the given output.
+     *
+     * @param sharedMatrix a projection matrix shared with other segments of the shard, to use as-is, keeping its id, or
+     *        {@code null} to warm-start from {@code inherited} or train W. When supplied, it must have the shape this segment's
+     *        configuration projects to; a mismatch is a programming error and throws.
+     * @param resolveTrained called with a newly learned projection matrix before anything is encoded with it, returning the
+     *        matrix to use instead, which may be a shared matrix of the same shape that became available while training, or
+     *        {@code null} to always use the learned matrix
+     * @see #buildAndWrite(FieldInfo, CentroidSupplier, FloatVectorValues, IndexOutput, long, int[], OverspillAssignments,
+     *      IvfSegmentConfig.AshConfig, TaskExecutor, VectorSimilarityFunction, boolean, AshProjectionMatrix, boolean)
+     */
+    public PostingsOffsetAndLength buildAndWrite(
+        FieldInfo fieldInfo,
+        CentroidSupplier centroidSupplier,
+        FloatVectorValues floatVectorValues,
+        IndexOutput postingsOutput,
+        long fileOffset,
+        int[] assignments,
+        OverspillAssignments overspillAssignments,
+        IvfSegmentConfig.AshConfig ashConfig,
+        TaskExecutor quantizerExec,
+        VectorSimilarityFunction similarityFunction,
+        boolean skipDocIds,
+        AshProjectionMatrix sharedMatrix,
+        UnaryOperator<AshProjectionMatrix> resolveTrained,
+        AshProjectionMatrix inherited,
+        boolean useMergeTrainingFactor
+    ) throws IOException {
         int nVectors = assignments.length;
         int originalDim = fieldInfo.getVectorDimension();
         int nClusters = centroidSupplier.size();
@@ -145,8 +194,23 @@ public class AshPostingsListWriter {
         // - otherwise: train W from scratch: the PCA subspace of the training sample, then a rotation (random, unless
         // Procrustes iterations are configured).
         CheckedIntFunction<float[], IOException> centroidGetter = i -> centroidSupplier.centroid(assignments[i]);
-        final AsymmetricHashingQuantizer.TrainedProjection trained;
-        if (inherited != null) {
+        AsymmetricHashingQuantizer.TrainedProjection trained;
+        if (sharedMatrix != null) {
+            if (sharedMatrix.hasShape(originalDim, nDims) == false) {
+                throw new IllegalArgumentException(
+                    "shared projection matrix has shape ["
+                        + sharedMatrix.originalDim()
+                        + "x"
+                        + sharedMatrix.nDims()
+                        + "] but expected ["
+                        + originalDim
+                        + "x"
+                        + nDims
+                        + "]"
+                );
+            }
+            trained = AsymmetricHashingQuantizer.unchangedProjection(sharedMatrix);
+        } else if (inherited != null) {
             trained = ashQuantizer.trainWarmStart(vectors, nVectors, originalDim, centroidGetter, inherited, WARM_START_REFINE_ITERATIONS);
         } else {
             // LEARNED learns the PCA subspace from the training sample and rotates it.
@@ -156,8 +220,36 @@ public class AshPostingsListWriter {
         // Store the projection matrix for later serialization. The quantizer reports whether W was learned from
         // enough vectors to be inherited/warm-started at merge time. A random orthonormal fallback, or a
         // projection learned from fewer than twice as many vectors as projected dimensions (a small segment), is
-        // marked learned=false so that merge does not inherit it.
-        this.ashProjectionMatrix = trained.matrix();
+        // marked learned=false so that merge does not inherit it. A shared matrix is kept as-is, with its id, so that
+        // segments sharing it can be recognized as such at search time.
+        boolean adopted = false;
+        if (sharedMatrix != null) {
+            this.ashProjectionMatrix = sharedMatrix;
+        } else {
+            AshProjectionMatrix learnedMatrix = trained.matrix();
+            AshProjectionMatrix resolved = resolveTrained != null ? resolveTrained.apply(learnedMatrix) : learnedMatrix;
+            if (resolved.id().equals(learnedMatrix.id()) == false) {
+                // another flush or merge made a matrix shared while this one trained: encode with that instead
+                if (resolved.hasShape(originalDim, nDims) == false) {
+                    throw new IllegalStateException("resolved projection matrix has a different shape than the learned one");
+                }
+                trained = AsymmetricHashingQuantizer.unchangedProjection(resolved);
+                adopted = true;
+            }
+            this.ashProjectionMatrix = resolved;
+        }
+        if (logger.isDebugEnabled()) {
+            logger.debug(
+                "ASH projection for field [{}]: {} matrix [{}], learned from [{}] vectors, captures [{}] of the residual energy "
+                    + "of [{}] vectors",
+                fieldInfo.name,
+                sharedMatrix != null ? "shared" : adopted ? "adopted shared" : inherited != null ? "warm-started" : "trained",
+                ashProjectionMatrix.id(),
+                ashProjectionMatrix.trainingSampleSize(),
+                capturedEnergy(vectors, nVectors, originalDim, centroidGetter, trained.wT(), nDims),
+                nVectors
+            );
+        }
 
         // Build cluster-to-vector mappings, counting primary + SOAR overspill assignments
         ClusterAssignmentBuilder clusterAssignments = ClusterAssignmentBuilder.build(assignments, overspillAssignments, nClusters);
@@ -352,6 +444,52 @@ public class AshPostingsListWriter {
         }
 
         return new PostingsOffsetAndLength(offsets.build(), lengths.build());
+    }
+
+    /** Most vectors {@link #capturedEnergy} projects. */
+    private static final int ENERGY_SAMPLE_SIZE = 256;
+
+    /**
+     * Returns the mean squared norm of the projection through W of the normalized, centered vectors of an evenly spaced
+     * sample of the segment: the fraction of the residual energy W keeps, between 0 and 1 since W has orthonormal columns.
+     * A shared W that captures noticeably less of a segment's energy than a W learned from that segment would indicate the
+     * data has drifted away from the sample W was learned from. Only computed for debug logging.
+     */
+    private static double capturedEnergy(
+        CheckedIntFunction<float[], IOException> vectors,
+        int nVectors,
+        int originalDim,
+        CheckedIntFunction<float[], IOException> centroids,
+        float[] wT,
+        int nDims
+    ) throws IOException {
+        if (nVectors == 0) {
+            return Double.NaN;
+        }
+        int sampleSize = Math.min(ENERGY_SAMPLE_SIZE, nVectors);
+        float[] residual = new float[originalDim];
+        double total = 0;
+        int counted = 0;
+        for (int s = 0; s < sampleSize; s++) {
+            int ord = (int) ((long) s * nVectors / sampleSize);
+            float[] vector = vectors.apply(ord);
+            float[] centroid = centroids.apply(ord);
+            for (int d = 0; d < originalDim; d++) {
+                residual[d] = vector[d] - centroid[d];
+            }
+            float normSq = ESVectorUtil.dotProduct(residual, residual);
+            if (normSq == 0) {
+                continue;
+            }
+            double projectedSq = 0;
+            for (int j = 0; j < nDims; j++) {
+                float dot = ESVectorUtil.dotProduct(wT, j * originalDim, residual, 0, originalDim);
+                projectedSq += (double) dot * dot;
+            }
+            total += projectedSq / normSq;
+            counted++;
+        }
+        return counted == 0 ? Double.NaN : total / counted;
     }
 
     private static void printClusterQualityStatistics(int[][] clusters) {

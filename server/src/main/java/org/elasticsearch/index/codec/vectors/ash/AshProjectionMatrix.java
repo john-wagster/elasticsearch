@@ -36,8 +36,9 @@ import java.util.UUID;
  *   [float[originalDim * nDims]] WT matrix in row-major order (little-endian)
  * </pre>
  * <p>
- * The id identifies the content of W: a newly trained matrix gets a new random (version 4) UUID, and a matrix that is reused as-is,
- * for instance by a merge from one of its input segments, keeps its id. Two segments with the same id therefore have the
+ * The id identifies the content of W: a newly trained matrix gets a new random (version 4) UUID, and a matrix that is
+ * reused as-is, for instance by a merge from one of its input segments or from the shard's
+ * {@link AshProjectionRegistry}, keeps its id. Two segments with the same id therefore have the
  * same W, so a query projected through one of them can be reused for the other, and readers can share a single in-memory
  * copy. The training sample size is the number of vectors W's subspace was estimated from, 0 if none, so that a matrix
  * can be reused only by segments for which it is as good as one they would learn themselves.
@@ -110,6 +111,20 @@ public final class AshProjectionMatrix {
     /** Returns the number of vectors W's subspace was estimated from, 0 if none. */
     public int trainingSampleSize() {
         return trainingSampleSize;
+    }
+
+    /**
+     * Returns whether W was learned from a full training sample of at least {@code requiredSampleSize} vectors, and so
+     * is as good a projection for any other segment of the same field as one that segment would learn itself. Only such
+     * a matrix is shared across segments.
+     */
+    public boolean isShareable(int requiredSampleSize) {
+        return learned && trainingSampleSize >= requiredSampleSize;
+    }
+
+    /** Returns whether this matrix projects vectors of {@code expectedOriginalDim} dimensions to {@code expectedNDims}. */
+    public boolean hasShape(int expectedOriginalDim, int expectedNDims) {
+        return originalDim == expectedOriginalDim && nDims == expectedNDims;
     }
 
     /**

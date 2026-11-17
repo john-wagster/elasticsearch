@@ -13,6 +13,7 @@ import org.elasticsearch.index.codec.vectors.ash.AshProjectionMatrix;
 import org.elasticsearch.index.codec.vectors.diskbbq.IvfSegmentConfig;
 import org.elasticsearch.test.ESTestCase;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -107,5 +108,43 @@ public class ESNextDiskASHVectorsWriterTests extends ESTestCase {
     public void testReturnsNullWhenAllDimensionMismatch() {
         var candidates = List.of(new ESNextDiskASHVectorsWriter.SizedProjectionMatrix(learned(8, 2, 1.0f), 10));
         assertNull(ESNextDiskASHVectorsWriter.selectInheritedProjectionMatrix(4, 2, candidates));
+    }
+
+    private static AshProjectionMatrix withSample(UUID id, int originalDim, int nDims, boolean learned, int sample) {
+        return new AshProjectionMatrix(new float[originalDim * nDims], originalDim, nDims, learned, id, sample);
+    }
+
+    private static ESNextDiskASHVectorsWriter.SizedProjectionMatrix sized(AshProjectionMatrix matrix, int size) {
+        return new ESNextDiskASHVectorsWriter.SizedProjectionMatrix(matrix, size);
+    }
+
+    public void testShareableSelectionPrefersMatrixUsedByMostVectors() {
+        UUID common = UUID.randomUUID();
+        UUID large = UUID.randomUUID();
+        AshProjectionMatrix commonA = withSample(common, 4, 2, true, 100);
+        var candidates = List.of(
+            // two segments sharing W hold more vectors together than the single largest segment
+            sized(commonA, 60),
+            sized(withSample(common, 4, 2, true, 100), 60),
+            sized(withSample(large, 4, 2, true, 100), 100)
+        );
+        AshProjectionMatrix selected = ESNextDiskASHVectorsWriter.selectShareableProjectionMatrix(4, 2, 100, candidates);
+        assertNotNull(selected);
+        assertEquals(common, selected.id());
+    }
+
+    public void testShareableSelectionSkipsPartialSamplesAndMismatchedShapes() {
+        var candidates = List.of(
+            sized(withSample(UUID.randomUUID(), 4, 2, true, 99), 1000),
+            sized(withSample(UUID.randomUUID(), 4, 2, false, 100), 1000),
+            sized(withSample(UUID.randomUUID(), 8, 2, true, 100), 1000),
+            sized(withSample(UUID.randomUUID(), 4, 3, true, 100), 1000)
+        );
+        assertNull(ESNextDiskASHVectorsWriter.selectShareableProjectionMatrix(4, 2, 100, candidates));
+
+        AshProjectionMatrix eligible = withSample(UUID.randomUUID(), 4, 2, true, 100);
+        var withEligible = new ArrayList<>(candidates);
+        withEligible.add(sized(eligible, 1));
+        assertSame(eligible, ESNextDiskASHVectorsWriter.selectShareableProjectionMatrix(4, 2, 100, withEligible));
     }
 }

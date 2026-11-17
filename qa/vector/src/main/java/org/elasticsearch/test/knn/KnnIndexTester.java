@@ -55,6 +55,7 @@ import org.elasticsearch.index.codec.vectors.diskbbq.IvfSegmentConfig;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantEncoding;
 import org.elasticsearch.index.codec.vectors.diskbbq.SegmentCalibrationParameters;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskASHVectorsFormat;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskASHVectorsReader;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat;
 import org.elasticsearch.index.codec.vectors.es93.ES93BinaryQuantizedVectorsFormat;
 import org.elasticsearch.index.codec.vectors.es93.ES93FlatVectorFormat;
@@ -87,6 +88,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.DoubleSummaryStatistics;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -938,6 +940,7 @@ public class KnnIndexTester {
     static void numSegments(Path indexPath, Results result) throws IOException {
         try (Directory dir = KnnIndexer.getDirectory(indexPath); IndexReader reader = DirectoryReader.open(dir)) {
             result.numSegments = reader.leaves().size();
+            logProjectionMatrices(reader);
         } catch (IOException e) {
             throw new IOException("Failed to get segment count for index at " + indexPath, e);
         }
@@ -946,8 +949,28 @@ public class KnnIndexTester {
     static void numSegments(Directory dir, Results result) throws IOException {
         try (IndexReader reader = DirectoryReader.open(dir)) {
             result.numSegments = reader.leaves().size();
+            logProjectionMatrices(reader);
         } catch (IOException e) {
             throw new IOException("Failed to get segment count for dir: " + dir, e);
+        }
+    }
+
+    /** Logs how many distinct ASH projection matrices the segments use, as each distinct one costs a query projection. */
+    private static void logProjectionMatrices(IndexReader reader) {
+        Map<String, Integer> segmentsById = new HashMap<>();
+        for (LeafReaderContext ctx : reader.leaves()) {
+            String id = ESNextDiskASHVectorsReader.projectionMatrixId(ctx.reader(), KnnIndexer.VECTOR_FIELD);
+            if (id != null) {
+                segmentsById.merge(id, 1, Integer::sum);
+            }
+        }
+        if (segmentsById.isEmpty() == false) {
+            logger.info(
+                "ASH projection matrices: [{}] distinct across [{}] segments, segments per matrix {}",
+                segmentsById.size(),
+                reader.leaves().size(),
+                segmentsById.values()
+            );
         }
     }
 

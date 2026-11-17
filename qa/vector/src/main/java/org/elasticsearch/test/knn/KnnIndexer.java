@@ -50,6 +50,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.SliceIndexing;
 import org.elasticsearch.index.StandardIOBehaviorHint;
 import org.elasticsearch.index.store.FsDirectoryFactory;
+import org.elasticsearch.index.store.ShardCodecStateDirectory;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -289,9 +290,10 @@ public class KnnIndexer {
         Directory dir = FSDirectory.open(indexPath);
         if (dir instanceof MMapDirectory mmapDir) {
             mmapDir.setReadAdvice(getReadAdviceFunc()); // enable madvise
-            return new FsDirectoryFactory.HybridDirectory(NativeFSLockFactory.INSTANCE, mmapDir, 64);
+            dir = new FsDirectoryFactory.HybridDirectory(NativeFSLockFactory.INSTANCE, mmapDir, 64);
         }
-        return dir;
+        // per-shard codec state, as a shard's Store provides it
+        return ShardCodecStateDirectory.wrapIfEnabled(dir);
     }
 
     /**

@@ -9,8 +9,12 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq.next;
 
+import org.apache.lucene.codecs.KnnVectorsReader;
+import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
+import org.apache.lucene.index.CodecReader;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.KnnVectorValues;
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
@@ -25,6 +29,7 @@ import org.elasticsearch.common.CheckedIntFunction;
 import org.elasticsearch.index.codec.vectors.GenericFlatVectorReaders;
 import org.elasticsearch.index.codec.vectors.ash.AshPostingsVisitor;
 import org.elasticsearch.index.codec.vectors.ash.AshProjectionMatrix;
+import org.elasticsearch.index.codec.vectors.ash.AshProjectionRegistry;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIndexFormat;
@@ -35,6 +40,7 @@ import org.elasticsearch.index.codec.vectors.diskbbq.IvfSegmentConfig;
 import org.elasticsearch.index.codec.vectors.diskbbq.PrefetchingCentroidIterator;
 import org.elasticsearch.lucene.store.MemorySegmentAccessInputAccess;
 import org.elasticsearch.search.vectors.ESAcceptDocs;
+import org.elasticsearch.search.vectors.QueryTransformCache;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -47,6 +53,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVectorsReader.ASHFieldEntry> {
 
     private final ConcurrentHashMap<String, AshProjectionMatrix> ashMatrixCache;
+    // The shard's projection matrices, or null if the segment's directory carries no per-shard state
+    private final AshProjectionRegistry projectionRegistry;
 
     private final int queryBitsPerDim;
 
@@ -74,12 +82,14 @@ public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVe
             ESNextDiskASHVectorsFormat.DYNAMIC_VISIT_RATIO
         );
         this.ashMatrixCache = new ConcurrentHashMap<>();
+        this.projectionRegistry = AshProjectionRegistry.forDirectory(state.segmentInfo.dir);
         this.queryBitsPerDim = queryBitsPerDim;
     }
 
     private ESNextDiskASHVectorsReader(ESNextDiskASHVectorsReader other, GenericFlatVectorReaders genericReaders) {
         super(other, genericReaders);
         this.ashMatrixCache = other.ashMatrixCache;
+        this.projectionRegistry = other.projectionRegistry;
         this.queryBitsPerDim = other.queryBitsPerDim;
     }
 
@@ -216,7 +226,19 @@ public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVe
                 }
                 IndexInput slice = ivfCentroids.slice("ash-preconditioner", preconditionerOffset, preconditionerLength);
                 slice.seek(0);
-                return AshProjectionMatrix.read(slice);
+                AshProjectionMatrix matrix = AshProjectionMatrix.read(slice);
+                if (projectionRegistry != null) {
+                    // Share one in-memory copy with the shard's other segments that use the same matrix, and, after a
+                    // restart, let a matrix learned from a full sample become the shard's shared matrix again. The reader
+                    // does not know the writer's configuration, so this assumes the default training factor.
+                    int originalDim = fieldInfo.getVectorDimension();
+                    // as the writer requires, see ESNextDiskASHVectorsWriter#requiredSharedSampleSize
+                    int requiredSampleSize = matrix.nDims() == originalDim
+                        ? 0
+                        : IvfSegmentConfig.AshConfig.DEFAULT_TRAINING_FACTOR * originalDim;
+                    matrix = projectionRegistry.offer(fieldInfo.name, matrix, requiredSampleSize);
+                }
+                return matrix;
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
@@ -238,6 +260,27 @@ public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVe
             return null;
         }
         return getAshProjectionMatrix(fieldInfo);
+    }
+
+    /**
+     * Returns the id of the projection matrix the given segment uses for {@code field}, as a string, or {@code null} if the
+     * field is not ASH-encoded in that segment. For diagnostics, such as counting how many distinct projections a shard's
+     * segments use.
+     */
+    public static String projectionMatrixId(LeafReader leafReader, String field) {
+        if ((leafReader instanceof CodecReader) == false) {
+            return null;
+        }
+        KnnVectorsReader vectorsReader = ((CodecReader) leafReader).getVectorReader();
+        if (vectorsReader instanceof PerFieldKnnVectorsFormat.FieldsReader fieldsReader) {
+            vectorsReader = fieldsReader.getFieldReader(field);
+        }
+        FieldInfo fieldInfo = leafReader.getFieldInfos().fieldInfo(field);
+        if (vectorsReader instanceof ESNextDiskASHVectorsReader ashReader && fieldInfo != null) {
+            AshProjectionMatrix matrix = ashReader.getProjectionMatrix(fieldInfo);
+            return matrix == null ? null : matrix.id().toString();
+        }
+        return null;
     }
 
     /** Returns the bits per projected dimension the given field was written with in this segment, for tests. */
@@ -266,6 +309,10 @@ public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVe
                 yield widened;
             }
         };
+        // ASH does not build an IVF structure for byte vectors today, so byte queries are searched over the raw vectors
+        // and do not get here; should it, a widened byte query has the same values in every segment, so it can share
+        // projections as a float query does
+        QueryTransformCache transformCache = queryTarget.transformCache();
 
         var ashMatrix = getAshProjectionMatrix(fieldInfo);
         int dimension = fieldInfo.getVectorDimension();
@@ -314,7 +361,8 @@ public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVe
                 centroidReader,
                 values,
                 startDoc,
-                endDoc
+                endDoc,
+                transformCache
             );
         }
         return AshPostingsVisitor.create(
@@ -325,7 +373,8 @@ public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVe
             needsScoring,
             entry.ashBitsPerDim(),
             queryBitsPerDim,
-            centroidReader
+            centroidReader,
+            transformCache
         );
     }
 
@@ -413,7 +462,7 @@ public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVe
             fieldInfo,
             values,
             entry.postingListSlice(ivfClusters.clone()),
-            new QueryTarget.FloatQuery(query),
+            new QueryTarget.FloatQuery(query, QueryTransformCache.NONE),
             null,
             entry.centroidSlice(ivfCentroids.clone()),
             acceptDocs

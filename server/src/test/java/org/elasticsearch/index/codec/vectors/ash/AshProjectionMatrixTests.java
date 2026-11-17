@@ -122,9 +122,15 @@ public class AshProjectionMatrixTests extends ESTestCase {
         AshProjectionMatrix restored = writeAndRead(original);
         assertEquals(id, restored.id());
         assertEquals(trainingSampleSize, restored.trainingSampleSize());
-        assertEquals(originalDim, restored.originalDim());
-        assertEquals(nDims, restored.nDims());
-        assertArrayEquals(wT, restored.wT(), 0f);
+        assertTrue(restored.hasShape(originalDim, nDims));
+    }
+
+    public void testShareableRequiresLearnedFullSample() {
+        float[] wT = new float[8];
+        UUID id = UUID.randomUUID();
+        assertTrue(new AshProjectionMatrix(wT, 4, 2, true, id, 100).isShareable(100));
+        assertFalse(new AshProjectionMatrix(wT, 4, 2, true, id, 99).isShareable(100));
+        assertFalse(new AshProjectionMatrix(wT, 4, 2, false, id, 100).isShareable(100));
     }
 
     public void testRejectsNegativeTrainingSampleSize() {

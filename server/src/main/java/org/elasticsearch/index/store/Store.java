@@ -211,6 +211,8 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         // store.directory() continues to return the same StoreDirectory external callers expect (its getDelegate()
         // simply has one more layer underneath).
         byteSizeDirectory = (ByteSizeDirectory) FieldInfoCachingDirectory.wrapIfEnabled(byteSizeDirectory);
+        // Per-shard state shared by the codec across segments, inserted for the same reason
+        byteSizeDirectory = (ByteSizeDirectory) ShardCodecStateDirectory.wrapIfEnabled(byteSizeDirectory);
         this.directory = new StoreDirectory(byteSizeDirectory, Loggers.getLogger("index.store.deletes", shardId));
         this.shardLock = shardLock;
         this.onClose = onClose;
